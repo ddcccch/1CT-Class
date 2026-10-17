@@ -1,0 +1,399 @@
+{
+  "source": "packaged",
+  "packagedInfo": {
+    "rendererDir": "D:\\1111\\2class\\artifacts\\patched-renderer\\dist\\renderer",
+    "files": {
+      "panel.css": {
+        "sha256": "872bdf97821d38af1a7341a9b1abc3ca0a234bdef975ffc9647f2afc75550aed",
+        "bytes": 8523
+      },
+      "dashboard.css": {
+        "sha256": "29ae7857bb6e0d53468659b48c8af687b446e2ffa25348e81ba7607b5148ba58",
+        "bytes": 9978
+      },
+      "jsQR.js": {
+        "sha256": "3ae24ef919a523ba344b15f3145e23ce15cf05cdddcd4e27e5945f86b2337ba9",
+        "bytes": 266988
+      },
+      "score-policy.js": {
+        "sha256": "5d95a6db2524c342c4386e0c5175a1938a2b17e6b9f351d249c43d5dd22ae70f",
+        "bytes": 22407
+      },
+      "result-store.js": {
+        "sha256": "b7d3ae0c1a6a5c95508584e522f287e9446b308f8cbf68749eebf689997253b0",
+        "bytes": 27689
+      },
+      "automation.js": {
+        "sha256": "6d1f353ee0852a9f43ba2d962dc71753b1b46fdd79e1e6a575b417924e66a476",
+        "bytes": 90838
+      },
+      "dashboard.js": {
+        "sha256": "af94585177d76df0f0fe8937e6afdbd50121f53bd1dc42180185384a5708c125",
+        "bytes": 47520
+      },
+      "panel.js": {
+        "sha256": "30befbe7cc68d48da2c0b8d1906e78ecd8afe57a22233e319b151adbdf91daca",
+        "bytes": 47725
+      }
+    }
+  },
+  "startedAt": "2026-10-17T06:30:11.297Z",
+  "finishedAt": "2026-10-17T06:30:25.175Z",
+  "port": 52113,
+  "profile": "C:\\Users\\兑\\AppData\\Local\\Temp\\auto3ct-dashboard-cOj2zV",
+  "openedVia": "panel-entry",
+  "checks": [
+    {
+      "name": "打包副本脚本与 desktop 冻结源文件字节一致",
+      "ok": true,
+      "detail": "automation.js,panel.js,panel.css,score-policy.js,result-store.js,dashboard.js,dashboard.css"
+    },
+    {
+      "name": "打包副本来源",
+      "ok": true,
+      "detail": "D:\\1111\\2class\\artifacts\\patched-renderer\\dist\\renderer",
+      "kind": "info"
+    },
+    {
+      "name": "作者模块加载并创建 engine/store（onResult 已接线）",
+      "ok": true,
+      "detail": "ok"
+    },
+    {
+      "name": "看板打开方式",
+      "ok": true,
+      "detail": "panel-entry",
+      "kind": "info"
+    },
+    {
+      "name": "看板 dashboard-root 可见",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "初始无预置历史（结果 0 行）",
+      "ok": true,
+      "detail": "rows=0"
+    },
+    {
+      "name": "空态提示存在（无造数据）",
+      "ok": true,
+      "detail": "尚无记录（真实执行后会自动累计；预览不计入）"
+    },
+    {
+      "name": "存在「截图初值」导入按钮（不靠预置）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "「截图初值」按钮真实可用（未误置 disabled 布尔属性）",
+      "ok": true,
+      "detail": "disabled=false"
+    },
+    {
+      "name": "二课补分 8 个模块行（导入后）",
+      "ok": true,
+      "detail": "rows=8"
+    },
+    {
+      "name": "score 行值",
+      "ok": true,
+      "detail": "[{\"module\":\"思想政治与道德修养\",\"required\":\"12\",\"current\":\"6\",\"text\":\"思想政治与道德修养6 / 12 分要求已得\"},{\"module\":\"学术科技与创新创业\",\"required\":\"8\",\"current\":\"4\",\"text\":\"学术科技与创新创业4 / 8 分要求已得\"},{\"module\":\"艺术体验与审美修养\",\"required\":\"12\",\"current\":\"2\",\"text\":\"艺术体验与审美修养2 / 12 分要求已得\"},{\"module\":\"传统文化与人文素养\",\"required\":\"8\",\"current\":\"8.5\",\"text\":\"传统文化与人文素养8.5 / 8 分要求已得\"},{\"module\":\"人际交往与沟通能力\",\"required\":\"8\",\"current\":\"4\",\"text\":\"人际交往与沟通能力4 / 8 分要求已得\"},{\"module\":\"心理素质与身体素质\",\"required\":\"12\",\"current\":\"15.5\",\"text\":\"心理素质与身体素质15.5 / 12",
+      "kind": "info"
+    },
+    {
+      "name": "传统文化 8.5/8 真实值",
+      "ok": true,
+      "detail": "{\"module\":\"传统文化与人文素养\",\"required\":\"8\",\"current\":\"8.5\",\"text\":\"传统文化与人文素养8.5 / 8 分要求已得\"}"
+    },
+    {
+      "name": "心理素质 15.5/12 真实值",
+      "ok": true,
+      "detail": "{\"module\":\"心理素质与身体素质\",\"required\":\"12\",\"current\":\"15.5\",\"text\":\"心理素质与身体素质15.5 / 12 分要求已得\"}"
+    },
+    {
+      "name": "scores 行内文本可读（不只 input 值）",
+      "ok": true,
+      "detail": "思想政治与道德修养6 / 12 分要求已得 | 学术科技与创新创业4 / 8 分要求已得 | 艺术体验与审美修养2 / 12 分要求已得 | 传统文化与人文素养8.5 / 8 分要求已得 | 人际交往与沟通能力4 / 8 分要求已得 | 心理素质与身体素质15.5 / 12 分要求已得 | 社会实践与志愿服务11 / 12 分要求已得 | 社会工作与能力拓展3.5 / 8 分要求已得"
+    },
+    {
+      "name": "拒导入(critical) 结果",
+      "ok": true,
+      "detail": "{\"calls\":1,\"message\":\"绑定截图初值失败：account-mismatch\"}",
+      "kind": "info"
+    },
+    {
+      "name": "importScoreSnapshot 返回 ok:false 时显示失败/原因（不假成功）",
+      "ok": true,
+      "detail": "绑定截图初值失败：account-mismatch"
+    },
+    {
+      "name": "无 snapshot(critical) 状态",
+      "ok": true,
+      "detail": "{\"trusted\":false,\"totalGap\":null,\"gapText\":\"\",\"satisfiedText\":\"\"}",
+      "kind": "info"
+    },
+    {
+      "name": "无 snapshot/unknown 不显示 gap=0 全达标",
+      "ok": true,
+      "detail": "{\"trusted\":false,\"totalGap\":null,\"gapText\":\"\",\"satisfiedText\":\"\"}"
+    },
+    {
+      "name": "刷新官方成绩",
+      "ok": true,
+      "detail": "经 dashboard-refresh 按钮",
+      "kind": "info"
+    },
+    {
+      "name": "policy 状态",
+      "ok": true,
+      "detail": "{\"trusted\":true,\"totalGap\":29.5,\"satisfied\":2}",
+      "kind": "info"
+    },
+    {
+      "name": "官方完整成绩刷新后 policy.trusted=true",
+      "ok": true,
+      "detail": "{\"enabled\":true,\"trusted\":true,\"accountMatch\":true,\"stale\":false,\"reason\":\"ok\",\"accountId\":\"20230001\",\"source\":\"official\",\"refreshedAt\":1792218614035,\"updatedAt\":1792218614035,\"lastAttemptAt\":17922186"
+    },
+    {
+      "name": "官方 partial(8→7) 结果",
+      "ok": true,
+      "detail": "{\"beforeTrusted\":true,\"afterTrusted\":false,\"afterSatisfied\":[\"心理素质与身体素质\"],\"afterUnknown\":[],\"snapshotModules\":[{\"name\":\"思想政治与道德修养\",\"current\":6,\"trusted\":true},{\"name\":\"学术科技与创新创业\",\"current\":4,\"trusted\":true},{\"name\":\"艺术体验与审美修养\",\"current\":2,\"trusted\":true},{\"name\":\"传统文化与人文素养\",\"current\":8.5,\"trusted\":false},{\"name\":\"人际交往与沟通能力\",\"current\":4,\"trusted\":true},{\"name\":\"心理素质与身体素质\",\"current\":15.5,\"trusted\":true},{\"name\":\"社会实践与志愿服务\",\"current\":11,\"trusted\":true},{\"name\":\"社会工作与能力拓展\",\"current\":3.5,\"trusted\":true}],\"gapText\":\"\",\"satisfiedText\":\"\",\"policyCard\":\"\"}",
+      "kind": "info"
+    },
+    {
+      "name": "官方 partial 缺项时 policy.trusted 不得被强转为 true（无假达标）",
+      "ok": true,
+      "detail": "before=true after=false"
+    },
+    {
+      "name": "官方 partial 漏项不计入已达标",
+      "ok": true,
+      "detail": "[\"心理素质与身体素质\"]"
+    },
+    {
+      "name": "官方 partial 漏项标记 unknown/待确认（不按 0 计）",
+      "ok": true,
+      "detail": "{\"unknown\":[],\"modules\":[{\"name\":\"思想政治与道德修养\",\"current\":6,\"trusted\":true},{\"name\":\"学术科技与创新创业\",\"current\":4,\"trusted\":true},{\"name\":\"艺术体验与审美修养\",\"current\":2,\"trusted\":true},{\"name\":\"传统文化与人文素养\",\"current\":8.5,\"trusted\":false},{\"name\":\"人际交往与沟通能力\",\"current\":4,\"trusted\":true},{\"name\":\"心理素质与身体素质\",\"current\":15.5,\"trusted\":true},{\"name\":\"社会实践与志愿服务\",\"current\":11,\"trusted\":true},{\"name\":\"社会工作与能力拓展\",\"current\":3.5,\"trusted\":true}]}"
+    },
+    {
+      "name": "partial DOM",
+      "ok": true,
+      "detail": "{\"gapText\":\"总缺口已知缺口 29.5 · 1 项未知仅统计已知/可信模块的 max(0,要求-已得)；未知不按 0 计\",\"satisfyText\":\"已达标模块1 / 8达标后停止新增报名，已报名活动继续签到/签退\",\"policyText\":\"缺口策略已启用未导入/未刷新前会暂停新增报名（已报名继续签到退）\",\"staleText\":\"数据新鲜\",\"traditional\":{\"module\":\"传统文化与人文素养\",\"text\":\"传统文化与人文素养待确认8.5 / 8 分（旧值待确认，不计达标/缺口）\"},\"progressRowCount\":8}",
+      "kind": "info"
+    },
+    {
+      "name": "partial：overview 总缺口 DOM 文本非空且不假报 0",
+      "ok": true,
+      "detail": "\"总缺口已知缺口 29.5 · 1 项未知仅统计已知/可信模块的 max(0,要求-已得)；未知不按 0 计\""
+    },
+    {
+      "name": "partial：总缺口/已达标 DOM 明确体现未知或已知缺口（不是空/不是全达标）",
+      "ok": true,
+      "detail": "{\"gap\":\"总缺口已知缺口 29.5 · 1 项未知仅统计已知/可信模块的 max(0,要求-已得)；未知不按 0 计\",\"satisfied\":\"已达标模块1 / 8达标后停止新增报名，已报名活动继续签到/签退\"}"
+    },
+    {
+      "name": "partial：已达标 DOM 不含传统文化（不假达标）",
+      "ok": true,
+      "detail": "\"已达标模块1 / 8达标后停止新增报名，已报名活动继续签到/签退\""
+    },
+    {
+      "name": "partial：传统文化行 badge 显示「待确认」且保留旧值仅参考",
+      "ok": true,
+      "detail": "{\"module\":\"传统文化与人文素养\",\"text\":\"传统文化与人文素养待确认8.5 / 8 分（旧值待确认，不计达标/缺口）\"}"
+    },
+    {
+      "name": "partial：缺口策略卡 DOM 非空（已启用/已关闭）",
+      "ok": true,
+      "detail": "\"缺口策略已启用未导入/未刷新前会暂停新增报名（已报名继续签到退）\""
+    },
+    {
+      "name": "partial 后新增报名策略",
+      "ok": true,
+      "detail": "{\"available\":true,\"allow\":false,\"reason\":\"score-untrusted\",\"trusted\":false}",
+      "kind": "info"
+    },
+    {
+      "name": "官方 partial 后新增报名被阻断（fail-closed）",
+      "ok": true,
+      "detail": "{\"available\":true,\"allow\":false,\"reason\":\"score-untrusted\",\"trusted\":false}"
+    },
+    {
+      "name": "顶部总缺口 29.5",
+      "ok": true,
+      "detail": "总缺口29.5 分仅统计已知/可信模块的 max(0,要求-已得)；未知不按 0 计"
+    },
+    {
+      "name": "顶部已达标 2/8",
+      "ok": true,
+      "detail": "已达标模块2 / 8达标后停止新增报名，已报名活动继续签到/签退"
+    },
+    {
+      "name": "进度条 clamp 数据",
+      "ok": true,
+      "detail": "[{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"思想政治与道德修养\"},{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"学术科技与创新创业\"},{\"hasBar\":true,\"fill\":177.6875,\"track\":1064,\"ok\":true,\"styleWidth\":\"16.7%\",\"module\":\"艺术体验与审美修养\"},{\"hasBar\":true,\"fill\":1064,\"track\":1064,\"ok\":true,\"styleWidth\":\"100%\",\"module\":\"传统文化与人文素养\"},{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"人际交往与沟通能力\"},{\"hasBar\":true,\"fill\":1064,\"track\":1064,",
+      "kind": "info"
+    },
+    {
+      "name": "8 个模块进度条 fill 元素都存在",
+      "ok": true,
+      "detail": "count=8"
+    },
+    {
+      "name": "超要求模块进度条 clamp 100%（不溢出）",
+      "ok": true,
+      "detail": "[{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"思想政治与道德修养\"},{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"学术科技与创新创业\"},{\"hasBar\":true,\"fill\":177.6875,\"track\":1064,\"ok\":true,\"styleWidth\":\"16.7%\",\"module\":\"艺术体验与审美修养\"},{\"hasBar\":true,\"fill\":1064,\"track\":1064,\"ok\":true,\"styleWidth\":\"100%\",\"module\":\"传统文化与人文素养\"},{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"人际交往与沟通能力\"},{\"hasBar\":true,\"fill\":1064,\"track\":1064,\"ok\":true,\"styleWidth\":\"100%\",\"module\":\"心理素质与身体素质\"},{\"hasBar\":true,\"fill\":975.6875,\"track\":1064,\"ok\":true,\"styleWidth\":\"91.7%\",\"module\":\"社会实践与志愿服务\"},{\"hasBar\":true,\"fill\":466.03125,\"track\":1064,\"ok\":true,\"styleWidth\":\"43.8%\",\"module\":\"社会工作与能力拓展\"}]"
+    },
+    {
+      "name": "至少 2 个进度条达到 100%（8.5/8、15.5/12 clamp）",
+      "ok": true,
+      "detail": "full=2 data=[{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"思想政治与道德修养\"},{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"学术科技与创新创业\"},{\"hasBar\":true,\"fill\":177.6875,\"track\":1064,\"ok\":true,\"styleWidth\":\"16.7%\",\"module\":\"艺术体验与审美修养\"},{\"hasBar\":true,\"fill\":1064,\"track\":1064,\"ok\":true,\"styleWidth\":\"100%\",\"module\":\"传统文化与人文素养\"},{\"hasBar\":true,\"fill\":532,\"track\":1064,\"ok\":true,\"styleWidth\":\"50%\",\"module\":\"人际交往与沟通能力\"},{\"hasBar\":true,\"fill\":1064,\"track\":1064,\"ok\":true,\"styleWidth\":\"100%\",\"module\":\"心理素质与身体素质\"},{\"hasBar\":true,\"fill\":975.6875,\"track\":1064,\"ok\":true,\"styleWidth\":\"91.7%\",\"module\":\"社会实践与志愿服务\"},{\"hasBar\":true,\"fill\":466.03125,\"track\":1064,\"ok\":true,\"styleWidth\":\"43.8%\",\"module\":\"社会工作与能力拓展\"}]"
+    },
+    {
+      "name": "preview 轮不写入结果历史",
+      "ok": true,
+      "detail": "before=0 after=0"
+    },
+    {
+      "name": "engine 真实 fake 提交发生（fake 写调用 >0）",
+      "ok": true,
+      "detail": "writes=1"
+    },
+    {
+      "name": "onResult→store 落库（真实链路，未预置）",
+      "ok": true,
+      "detail": "count=1"
+    },
+    {
+      "name": "onResult 事件",
+      "ok": true,
+      "detail": "{\"module\":\"ek\",\"action\":\"signIn\",\"status\":\"success\",\"accountId\":\"20230001\",\"day\":\"2026-10-17\"}",
+      "kind": "info"
+    },
+    {
+      "name": "onResult 事件字段完整（accountId/day/status）",
+      "ok": true,
+      "detail": "{\"key\":\"2026-10-17|20230001|ek|act-fake-1|signIn\",\"at\":1792218617941,\"day\":\"2026-10-17\",\"accountId\":\"20230001\",\"accountMask\":\"20***01\",\"module\":\"ek\",\"action\":\"signIn\",\"activityId\":\"act-fake-1\",\"activi"
+    },
+    {
+      "name": "执行记录 UI 可见真实链路结果",
+      "ok": true,
+      "detail": "rows=1"
+    },
+    {
+      "name": "账号脱敏显示（不含完整手机号）",
+      "ok": true,
+      "detail": "时间账号模块动作活动状态原因2026-10-17 14:3020***01二课签到测试二课活动上游已接受"
+    },
+    {
+      "name": "summary complete：跨账号同 id 不合并（=0）",
+      "ok": true,
+      "detail": "{\"crossAccount\":0,\"crossModule\":0,\"sameIdentity\":1}"
+    },
+    {
+      "name": "summary complete：跨模块同 id 不合并（=0）",
+      "ok": true,
+      "detail": "{\"crossAccount\":0,\"crossModule\":0,\"sameIdentity\":1}"
+    },
+    {
+      "name": "summary complete：同身份 signIn+signOut = 1",
+      "ok": true,
+      "detail": "{\"crossAccount\":0,\"crossModule\":0,\"sameIdentity\":1}"
+    },
+    {
+      "name": "skip 不覆盖已 success 的 status/at/day",
+      "ok": true,
+      "detail": "{\"statusKept\":true,\"atKept\":true,\"dayKept\":true,\"dryRunRejected\":true,\"storageFailExplicit\":true}"
+    },
+    {
+      "name": "dry-run status 无 flag 被拒收",
+      "ok": true,
+      "detail": "{\"statusKept\":true,\"atKept\":true,\"dayKept\":true,\"dryRunRejected\":true,\"storageFailExplicit\":true}"
+    },
+    {
+      "name": "append 写失败显式返回 false（非假成功）",
+      "ok": true,
+      "detail": "{\"statusKept\":true,\"atKept\":true,\"dayKept\":true,\"dryRunRejected\":true,\"storageFailExplicit\":true}"
+    },
+    {
+      "name": "账号隔离：默认不含其他账号事件",
+      "ok": true,
+      "detail": "table=1"
+    },
+    {
+      "name": "XSS 活动标题按文本渲染（无脚本执行）",
+      "ok": true,
+      "detail": "window.__XSS__"
+    },
+    {
+      "name": "执行记录 3 个筛选 select（账号/模块/状态）均存在非空",
+      "ok": true,
+      "detail": "account=1 module=1 status=1"
+    },
+    {
+      "name": "module=club + status=success 筛选实际生效（行数减少且内容匹配）",
+      "ok": true,
+      "detail": "all=4 filtered=1 text=2026-10-17 14:3020***01俱乐部签到俱乐部签到活动上游已接受"
+    },
+    {
+      "name": "status=failed 筛选实际生效（含失败行）",
+      "ok": true,
+      "detail": "2026-10-17 14:3020***01俱乐部报名失败活动失败"
+    },
+    {
+      "name": "account=全部账号 筛选实际生效（行数 >= 当前组）",
+      "ok": true,
+      "detail": "allAccounts=5 currentGroup=1"
+    },
+    {
+      "name": "重置筛选恢复默认（行数回到当前组）",
+      "ok": true,
+      "detail": "reset=4 all=4"
+    },
+    {
+      "name": "概览逐模块成功动作卡存在",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "重开后结果历史持久（行数 >0）",
+      "ok": true,
+      "detail": "rows=4"
+    },
+    {
+      "name": "重开后分数快照持久（totalGap=29.5）",
+      "ok": true,
+      "detail": "29.5"
+    },
+    {
+      "name": "全程无外部网络请求",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "无页面 JS 异常",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "无 console.error",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "passed": 53,
+  "failed": 0,
+  "skipped": 0,
+  "externalRequests": [],
+  "pageErrors": [],
+  "consoleErrors": [],
+  "screenshots": [
+    "packaged-dashboard-01-empty-overview.png",
+    "packaged-dashboard-02-scores-after-import.png",
+    "packaged-dashboard-03-overview.png",
+    "packaged-dashboard-04-results.png",
+    "packaged-dashboard-05-reopened.png",
+    "packaged-dashboard-06-overview-module-cards.png",
+    "packaged-dashboard-07-partial-official.png"
+  ]
+}

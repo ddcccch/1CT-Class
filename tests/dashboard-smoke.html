@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>3CT 自动化看板验收台（fake ctAPI，无 PII）</title>
+<link rel="stylesheet" href="/desktop/panel.css" />
+<link rel="stylesheet" href="/desktop/dashboard.css" />
+<style>
+  body { margin: 0; background: #0f1115; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #e5e7eb; }
+  #harness-hint { max-width: 980px; margin: 12px auto; padding: 8px 12px; border-radius: 6px; background: #23262e; border: 1px solid #3a3f4b; font-size: 12px; color: #cbd5e1; }
+</style>
+</head>
+<body>
+  <div id="harness-hint">
+    离线看板验收台：window.ctAPI 为 fake（不联网、无真实凭证）。账号/成绩/活动全部假数据，无姓名/学号。
+    分数与历史由**作者模块 API**（engine.importScoreSnapshot / refreshScores、Auto3CTResults.createStore）产生，
+    不预置内部存储结构；截图前 UI 不注入真实个人信息。
+  </div>
+  <div id="auto3ct-panel-host"></div>
+
+  <script src="/desktop/vendor/jsQR.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    var calls = [];
+    var writes = /^(ek\.(applyActivity|signByQr|signInOutByOthers)|club\.(joinActivity|signInOrSignBack)|unirun\.(autoRun))$/;
+    function wrap(group, name, fn) {
+      return function (payload) {
+        calls.push({ name: group + '.' + name, payload: payload, write: writes.test(group + '.' + name) });
+        return Promise.resolve().then(function () { return fn(payload); });
+      };
+    }
+
+    var FAKE_ACCOUNT = { id: 'acc-fake-1', phone: '13800000000', password: 'fake-pw', remark: '测试账号', updatedAt: 1 };
+    var FAKE_EK_SESSION = {
+      JSESSIONID: 'fake-jsessionid', access_token: 'fake-access-token', refresh_token: 'fake-refresh-token',
+      user_info: { loginName: '20230001', studentId: '20230001', userName: '测试用户' },
+    };
+    var FAKE_CAMPUS = { id: 'campus-1', label: '测试校区', mapName: 'fake-map.txt', schoolSiteIndex: 1 };
+
+    // 官方成绩（与 score-policy 八模块 exact 对齐；need/got 见 QA 口径）
+    function officialScores() {
+      return {
+        Info: { StudentId: '20230001', SumGetNum: 55 },
+        TypeList: [
+          { CurriculumName: '思想政治与道德修养', SumScore: 6, ScoreList: [] },
+          { CurriculumName: '学术科技与创新创业', SumScore: 4, ScoreList: [] },
+          { CurriculumName: '艺术体验与审美修养', SumScore: 2, ScoreList: [] },
+          { CurriculumName: '传统文化与人文素养', SumScore: 8.5, ScoreList: [] },
+          { CurriculumName: '人际交往与沟通能力', SumScore: 4, ScoreList: [] },
+          { CurriculumName: '心理素质与身体素质', SumScore: 15.5, ScoreList: [] },
+          { CurriculumName: '社会实践与志愿服务', SumScore: 11, ScoreList: [] },
+          { CurriculumName: '社会工作与能力拓展', SumScore: 3.5, ScoreList: [] },
+        ],
+      };
+    }
+
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function beijingNow() {
+      var d = new Date(Date.now() + 8 * 3600 * 1000);
+      return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate()) + ' ' +
+        pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
+    }
+    // 二课活动：已报名、扫码签到窗口覆盖“现在”，供 engine 真实 fake 提交 → onResult
+    function ekDetail() {
+      var nowMinus = new Date(Date.now() + 8 * 3600 * 1000 - 5 * 60 * 1000);
+      var nowPlus = new Date(Date.now() + 8 * 3600 * 1000 + 10 * 60 * 1000);
+      function fmt(d) {
+        return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate()) + ' ' +
+          pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
+      }
+      return {
+        ActivityInfo: {
+          Id: 'act-fake-1', ActivityName: '测试二课活动', SignWay: '1', SignWayText: '扫码',
+          IsNeedSignInText: '是', IsNeedSignOutText: '否',
+          ModuleCodeText: '思想政治与道德修养',
+          ActivityQDDate: fmt(nowMinus) + ' 至 ' + fmt(nowPlus),
+          ActivityListInfo: { ActivitySignInfo: { SignD: '未签到', SignT: '未签退' } },
+        },
+        ApplyInfo: { Id: 'sign-fake-1', ActivityId: 'act-fake-1' },
+      };
+    }
+
+    var table = {
+      ek: {
+        getActivitiesList: function () {
+          return { List: { Items: [{ Id: 'act-fake-1', ActivityId: 'act-fake-1', ActivityName: '测试二课活动', ActivityStatus: '1' }] } };
+        },
+        getActivityDetail: function () { return ekDetail(); },
+        getStudentScores: function () { return officialScores(); },
+        activityBoundImages: function () { return { items: [{ id: 'img1', file_url: 'fake://qr1', created_at: beijingNow() }] }; },
+        applyActivity: function () { return { errcode: 0 }; },
+        signByQr: function () { return { errcode: 0 }; },
+      },
+      club: {
+        myActivityList: function () { return { code: 10000, response: { list: [] } }; },
+        activityList: function () { return { code: 10000, response: { list: [] } }; },
+        currentSignTask: function () { return { code: 10000, response: null }; },
+      },
+      unirun: {
+        campusLocalList: function () { return [FAKE_CAMPUS]; },
+        autoRun: function () { return { code: 10000, response: { recordId: 1 }, msg: 'ok' }; },
+      },
+    };
+    var ctAPI = {};
+    Object.keys(table).forEach(function (g) {
+      ctAPI[g] = {};
+      Object.keys(table[g]).forEach(function (n) { ctAPI[g][n] = wrap(g, n, table[g][n]); });
+    });
+    ctAPI.__fake = {
+      calls: calls,
+      writeCount: function () { return calls.filter(function (c) { return c.write; }).length; },
+      reset: function () { calls.length = 0; },
+      FAKE_ACCOUNT: FAKE_ACCOUNT,
+      FAKE_EK_SESSION: FAKE_EK_SESSION,
+      officialScores: officialScores,
+    };
+    window.ctAPI = ctAPI;
+
+    // 假账号/会话（登录态由引擎读取；均为 fake，无真实 token）
+    if (!window.localStorage.getItem('ct_unirun_accounts_v1')) {
+      window.localStorage.setItem('ct_unirun_accounts_v1', JSON.stringify({ selectedId: FAKE_ACCOUNT.id, items: [FAKE_ACCOUNT] }));
+    }
+    if (!window.localStorage.getItem('ct_ek_session_v1')) {
+      window.localStorage.setItem('ct_ek_session_v1', JSON.stringify(FAKE_EK_SESSION));
+    }
+    // 引擎配置：预览默认开；三模块启用但报名/签到关闭（本烟测只走 fake 校园跑真实提交一次）
+    if (!window.localStorage.getItem('auto3ct:config')) {
+      window.localStorage.setItem('auto3ct:config', JSON.stringify({
+        dryRun: true,
+        accountId: FAKE_ACCOUNT.id,
+        campusId: FAKE_CAMPUS.id,
+        unirun: { enabled: true, runAt: '00:00', windowMinutes: 720, runDistance: 3000, runTime: 30 },
+        ek: { enabled: false, keywords: [], allapply: false, apply: false, signIn: false, signOut: false, allowAll: false },
+        club: { enabled: false, keywords: [], join: false, signIn: false, signOut: false, allowAll: false },
+      }));
+    }
+    // 注意：不预置 auto3ct:scores / auto3ct:results —— 由作者 API 与 UI 按钮产生。
+    window.__SMOKE_READY__ = false;
+  })();
+  </script>
+
+  <script src="/desktop/score-policy.js"></script>
+  <script src="/desktop/result-store.js"></script>
+  <script src="/desktop/automation.js"></script>
+  <script src="/desktop/dashboard.js"></script>
+  <script src="/desktop/panel.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    function attachContext() {
+      try {
+        if (!window.Auto3CTAutomation || !window.Auto3CTResults || !window.Auto3CTDashboard) return false;
+        var storage = {
+          get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
+          set: function (k, v) { window.localStorage.setItem(k, v); },
+          remove: function (k) { window.localStorage.removeItem(k); },
+        };
+        var store = window.Auto3CTResults.createStore({ storage: storage });
+        var logs = [];
+        var engine = window.Auto3CTAutomation.createEngine({
+          api: window.ctAPI,
+          storage: storage,
+          decodeQr: function () { return Promise.resolve('lbUUh-fake-qr-0001'); },
+          logger: { log: function (msg) { logs.push(String(msg)); } },
+          // 真实链路：engine 仅在真实提交定论后回调 → 作者 store.append
+          onResult: function (event) { return store.append(event); },
+        });
+        window.__SMOKE_CTX__ = { engine: engine, store: store, storage: storage, logs: logs };
+        return true;
+      } catch (err) {
+        window.__SMOKE_CTX_ERROR__ = String(err && err.stack ? err.stack : err);
+        return false;
+      }
+    }
+
+    function done() { window.__SMOKE_READY__ = true; }
+    if (attachContext()) done();
+    else {
+      var tries = 0;
+      var timer = setInterval(function () {
+        tries += 1;
+        if (attachContext() || tries > 120) { clearInterval(timer); done(); }
+      }, 50);
+    }
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+{
+  "startedAt": "2026-10-17T06:34:01.011Z",
+  "port": 57199,
+  "profile": "D:\\1111\\2class\\artifacts\\dashboard\\electron-profile-mvc0tp3k",
+  "checks": [
+    {
+      "name": "无其它 3CT 进程占用（不 kill 用户进程）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "GUI launcher 启动成功并快速返回",
+      "ok": true,
+      "detail": "exit=0"
+    },
+    {
+      "name": "CDP 就绪（真实 Electron 已起）",
+      "ok": true,
+      "detail": "{\"Browser\":\"Chrome/134.0.6998.88\",\"Protocol-Version\":\"1.3\",\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) 3CT/1."
+    },
+    {
+      "name": "窗口 title 含 3CT Auto",
+      "ok": true,
+      "detail": "3CT Auto"
+    },
+    {
+      "name": "窗口来自打包副本 file://",
+      "ok": true,
+      "detail": "file:///D:/1111/2class/3CT-Auto/resources/app.asar/dist/renderer/index.html"
+    },
+    {
+      "name": "window.Auto3CTScorePolicy 已加载",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "window.Auto3CTResults 已加载（result-store）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "window.Auto3CTDashboard 已加载",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "panel 入口 a3-open-dashboard 存在",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "真实 Electron 内 dashboard.open 生效（isOpen）",
+      "ok": true,
+      "detail": "{\"isOpen\":true,\"rootVisible\":true,\"gapText\":\"总缺口待导入/刷新尚未导入成绩：新增报名暂停，请先刷新官方成绩或使用截图初值\",\"emptyText\":\"尚无记录（真实执行后会自动累计；预览不计入）\"}"
+    },
+    {
+      "name": "看板根节点可见",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "未登录空看板显示待导入/未知（不假达标）",
+      "ok": true,
+      "detail": "{\"isOpen\":true,\"rootVisible\":true,\"gapText\":\"总缺口待导入/刷新尚未导入成绩：新增报名暂停，请先刷新官方成绩或使用截图初值\",\"emptyText\":\"尚无记录（真实执行后会自动累计；预览不计入）\"}"
+    }
+  ],
+  "launcherExitCode": 0,
+  "pageTitle": "3CT Auto",
+  "pageUrl": "file:///D:/1111/2class/3CT-Auto/resources/app.asar/dist/renderer/index.html",
+  "globals": {
+    "scorePolicy": true,
+    "results": true,
+    "dashboard": true,
+    "automation": true,
+    "panel": true,
+    "entry": true
+  },
+  "dashboard": {
+    "isOpen": true,
+    "rootVisible": true,
+    "gapText": "总缺口待导入/刷新尚未导入成绩：新增报名暂停，请先刷新官方成绩或使用截图初值",
+    "emptyText": "尚无记录（真实执行后会自动累计；预览不计入）"
+  },
+  "ok": true,
+  "killed": [
+    {
+      "pid": 7596,
+      "name": "3CT-Auto.exe"
+    }
+  ],
+  "leftover": [],
+  "finishedAt": "2026-10-17T06:34:08.609Z",
+  "passed": 12,
+  "failed": 0
+}
