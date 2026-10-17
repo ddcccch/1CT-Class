@@ -7,6 +7,8 @@
 /rea-analysis.json
 /3CT-Auto/
 /desktop/vendor/
+/artifacts/patched-renderer/
+/artifacts/test-profile/
 # Local credentials and runtime state
 .env
 .env.*
