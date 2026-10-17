@@ -203,11 +203,53 @@ class PatchTests(unittest.TestCase):
 
         self.assertIn("<title>3CT Auto</title>", patched)
         self.assertIn("./panel.css", patched)
+        self.assertIn("./dashboard.css", patched)
         for script in ("./jsQR.js", "./automation.js", "./panel.js"):
             self.assertIn(f"src={script}", patched)
         self.assertLess(patched.index("./jsQR.js"), patched.index("./automation.js"))
         self.assertLess(patched.index("./automation.js"), patched.index("./panel.js"))
         self.assertLess(patched.index("./panel.js"), patched.index("</head>"))
+
+    def test_patch_index_html_load_order_includes_score_result_dashboard(self):
+        patched = install.patch_index_html(self.ORIGINAL_HTML).decode()
+
+        order = [
+            "./jsQR.js",
+            "./score-policy.js",
+            "./result-store.js",
+            "./automation.js",
+            "./dashboard.js",
+            "./panel.js",
+        ]
+        for script in order:
+            self.assertIn(f"src={script}", patched)
+        positions = [patched.index(script) for script in order]
+        self.assertEqual(positions, sorted(positions), "脚本加载顺序必须为 " + " -> ".join(order))
+        # CSS 先 panel 后 dashboard，且都在 </head> 前
+        self.assertLess(patched.index("./panel.css"), patched.index("./dashboard.css"))
+        self.assertLess(patched.index("./dashboard.css"), patched.index("</head>"))
+
+    def test_patch_sources_include_new_renderer_assets(self):
+        expected = {
+            "dist/renderer/score-policy.js",
+            "dist/renderer/result-store.js",
+            "dist/renderer/dashboard.js",
+            "dist/renderer/dashboard.css",
+        }
+        self.assertTrue(expected.issubset(set(install.PATCH_SOURCES)), install.PATCH_SOURCES)
+        self.assertEqual(
+            install.RENDERER_SCRIPTS,
+            (
+                "jsQR.js",
+                "score-policy.js",
+                "result-store.js",
+                "automation.js",
+                "dashboard.js",
+                "panel.js",
+                "panel.css",
+                "dashboard.css",
+            ),
+        )
 
     def test_patch_index_html_keeps_renderer_before_automation(self):
         patched = install.patch_index_html(self.ORIGINAL_HTML).decode()
@@ -249,6 +291,10 @@ class FixtureDesktopMixin:
         (desktop / "vendor").mkdir(parents=True)
         (desktop / "bootstrap.cjs").write_text("process.env.CT_UPDATE_URL='';\nrequire('./main.js');\n", encoding="utf-8")
         (desktop / "automation.js").write_text("/* automation */\n", encoding="utf-8")
+        (desktop / "score-policy.js").write_text("/* score policy */\n", encoding="utf-8")
+        (desktop / "result-store.js").write_text("/* result store */\n", encoding="utf-8")
+        (desktop / "dashboard.js").write_text("/* dashboard */\n", encoding="utf-8")
+        (desktop / "dashboard.css").write_text(".dashboard{color:#111}\n", encoding="utf-8")
         (desktop / "panel.css").write_text(".panel{color:red}\n", encoding="utf-8")
         (desktop / "vendor" / "jsQR.js").write_text("/* jsQR */\n", encoding="utf-8")
         (desktop / install.LAUNCHER_NAME).write_text(
@@ -304,14 +350,25 @@ class BuildFromSyntheticTests(FixtureDesktopMixin, unittest.TestCase):
         patched = read_asar_files(self.dest / "resources" / "app.asar")
         self.assertIn(b"<title>3CT Auto</title>", patched["dist/renderer/index.html"])
         self.assertIn(b"./panel.js", patched["dist/renderer/index.html"])
+        self.assertIn(b"./dashboard.js", patched["dist/renderer/index.html"])
+        self.assertIn(b"./dashboard.css", patched["dist/renderer/index.html"])
         self.assertEqual(patched["dist/renderer/panel.css"], (self.desktop / "panel.css").read_bytes())
+        self.assertEqual(patched["dist/renderer/dashboard.css"], (self.desktop / "dashboard.css").read_bytes())
+        self.assertEqual(patched["dist/renderer/score-policy.js"], (self.desktop / "score-policy.js").read_bytes())
+        self.assertEqual(patched["dist/renderer/result-store.js"], (self.desktop / "result-store.js").read_bytes())
+        self.assertEqual(patched["dist/renderer/dashboard.js"], (self.desktop / "dashboard.js").read_bytes())
         self.assertEqual(patched["dist/renderer/jsQR.js"], (self.desktop / "vendor" / "jsQR.js").read_bytes())
         self.assertEqual(patched["dist/main/auto-bootstrap.cjs"], self.desktop.joinpath("bootstrap.cjs").read_bytes())
         package = json.loads(patched["package.json"])
         self.assertEqual(package["main"], "./dist/main/auto-bootstrap.cjs")
         self.assertEqual(package["name"], "3CT")
-        self.assertEqual(patched["node_modules/sql.js/sql-wasm.js"], b"sql")
-        self.assertEqual(patched["dist/main/main.js"], b"main")
+        # 原包所有文件必须无损保留（含未改动的 node_modules / main.js）
+        original = read_asar_files(self.source / "resources" / "app.asar")
+        for path, data in original.items():
+            with self.subTest(path=path):
+                self.assertIn(path, patched, "重建后丢失原文件: " + path)
+                if path not in (install.INDEX_HTML_PATH, install.PACKAGE_JSON_PATH):
+                    self.assertEqual(patched[path], data, "原文件被改动: " + path)
 
     def test_build_does_not_modify_original_tree(self):
         original_hash = hashlib.sha256((self.source / "resources" / "app.asar").read_bytes()).hexdigest()
@@ -448,28 +505,52 @@ class RealArchiveTests(unittest.TestCase):
         desktop = FixtureDesktopMixin()
         fixture = desktop.make_desktop_fixture(self.dir)
         before_hash = hashlib.sha256(REAL_ASAR.read_bytes()).hexdigest()
+        original_files = read_asar_files(REAL_ASAR)
 
         patched = install.build_patched_asar(REAL_ASAR, fixture)
         patched_path = self.dir / "patched.asar"
         patched_path.write_bytes(patched)
 
         result = install.verify_patched_asar(patched_path, REAL_ASAR, fixture)
-        self.assertEqual(result["entries"], 352)
-        self.assertEqual(result["integrity_verified"], 352)
+        # entries 以“原文件数 + 新增补丁文件数”推导，不硬编码旧 352
+        expected_entries = len(original_files) + len(install.PATCH_SOURCES)
+        self.assertEqual(result["entries"], expected_entries)
+        self.assertEqual(result["integrity_verified"], expected_entries)
+        patched_expected = set(install.PATCH_SOURCES) | {
+            install.INDEX_HTML_PATH,
+            install.PACKAGE_JSON_PATH,
+        }
+        self.assertEqual(
+            result["unchanged_verified"],
+            len(original_files) - len(set(original_files) & patched_expected),
+        )
         self.assertEqual(
             hashlib.sha256(REAL_ASAR.read_bytes()).hexdigest(), before_hash
         )
 
         patched_files = read_asar_files(patched_path)
         index_html = patched_files["dist/renderer/index.html"].decode()
-        for needle in ("./jsQR.js", "./automation.js", "./panel.js", "./panel.css"):
+        for needle in (
+            "./jsQR.js",
+            "./score-policy.js",
+            "./result-store.js",
+            "./automation.js",
+            "./dashboard.js",
+            "./panel.js",
+            "./panel.css",
+            "./dashboard.css",
+        ):
             self.assertIn(needle, index_html)
         self.assertIn("<title>3CT Auto</title>", index_html)
         self.assertEqual(json.loads(patched_files["package.json"])["main"], "./dist/main/auto-bootstrap.cjs")
-        self.assertEqual(
-            patched_files["node_modules/electron-updater/package.json"],
-            read_asar_files(REAL_ASAR)["node_modules/electron-updater/package.json"],
-        )
+        # 原包未改文件逐一保留（含 electron-updater package.json 等）
+        for path, data in original_files.items():
+            if path in (install.INDEX_HTML_PATH, install.PACKAGE_JSON_PATH):
+                continue
+            with self.subTest(path=path):
+                self.assertIn(path, patched_files, "重建后丢失原文件: " + path)
+                if path not in install.PATCH_SOURCES:
+                    self.assertEqual(patched_files[path], data, "原文件被改动: " + path)
 
     def test_extract_jsqr_from_real_sourcemap(self):
         result = install.extract_jsqr(REAL_ASAR, self.dir / "vendor")

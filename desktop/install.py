@@ -70,19 +70,35 @@ PACKAGE_JSON_PATH = "package.json"
 BOOTSTRAP_PATH = "dist/main/auto-bootstrap.cjs"
 INDEX_TITLE_OLD = "<title>3CT</title>"
 INDEX_TITLE_NEW = "<title>3CT Auto</title>"
-INDEX_STYLES = '<link href=./panel.css rel=stylesheet>'
+INDEX_STYLES = '<link href=./panel.css rel=stylesheet><link href=./dashboard.css rel=stylesheet>'
 INDEX_SCRIPTS = (
     "<script defer=defer src=./jsQR.js></script>"
+    "<script defer=defer src=./score-policy.js></script>"
+    "<script defer=defer src=./result-store.js></script>"
     "<script defer=defer src=./automation.js></script>"
+    "<script defer=defer src=./dashboard.js></script>"
     "<script defer=defer src=./panel.js></script>"
 )
-RENDERER_SCRIPTS = ("jsQR.js", "automation.js", "panel.js", "panel.css")
+RENDERER_SCRIPTS = (
+    "jsQR.js",
+    "score-policy.js",
+    "result-store.js",
+    "automation.js",
+    "dashboard.js",
+    "panel.js",
+    "panel.css",
+    "dashboard.css",
+)
 #: 新文件：ASAR 内路径 -> desktop 目录下的来源（bootstrap 单独处理）。
 PATCH_SOURCES = {
     "dist/renderer/jsQR.js": VENDOR_DIR / "jsQR.js",
+    "dist/renderer/score-policy.js": DESKTOP_DIR / "score-policy.js",
+    "dist/renderer/result-store.js": DESKTOP_DIR / "result-store.js",
     "dist/renderer/automation.js": DESKTOP_DIR / "automation.js",
+    "dist/renderer/dashboard.js": DESKTOP_DIR / "dashboard.js",
     "dist/renderer/panel.js": DESKTOP_DIR / "panel.js",
     "dist/renderer/panel.css": DESKTOP_DIR / "panel.css",
+    "dist/renderer/dashboard.css": DESKTOP_DIR / "dashboard.css",
     BOOTSTRAP_PATH: DESKTOP_DIR / "bootstrap.cjs",
 }
 
@@ -345,9 +361,13 @@ def load_patch_inputs(desktop_dir: str | Path = DESKTOP_DIR) -> dict[str, bytes]
     vendor_dir = desktop_dir / "vendor"
     sources = {
         "dist/renderer/jsQR.js": vendor_dir / "jsQR.js",
+        "dist/renderer/score-policy.js": desktop_dir / "score-policy.js",
+        "dist/renderer/result-store.js": desktop_dir / "result-store.js",
         "dist/renderer/automation.js": desktop_dir / "automation.js",
+        "dist/renderer/dashboard.js": desktop_dir / "dashboard.js",
         "dist/renderer/panel.js": desktop_dir / "panel.js",
         "dist/renderer/panel.css": desktop_dir / "panel.css",
+        "dist/renderer/dashboard.css": desktop_dir / "dashboard.css",
         BOOTSTRAP_PATH: desktop_dir / "bootstrap.cjs",
     }
     missing = [str(path.relative_to(desktop_dir.parent)) for path in sources.values() if not path.is_file()]
@@ -621,7 +641,17 @@ def verify_patched_asar(
 
     index_html = read_file(patched_archive, patched_files[INDEX_HTML_PATH], patched_base)
     text = index_html.decode("utf-8")
-    for needle in ("./jsQR.js", "./automation.js", "./panel.js", "./panel.css", "<title>3CT Auto</title>"):
+    for needle in (
+        "./jsQR.js",
+        "./score-policy.js",
+        "./result-store.js",
+        "./automation.js",
+        "./dashboard.js",
+        "./panel.js",
+        "./panel.css",
+        "./dashboard.css",
+        "<title>3CT Auto</title>",
+    ):
         if needle not in text:
             raise InstallerError(f"index.html 补丁缺失: {needle}")
 
