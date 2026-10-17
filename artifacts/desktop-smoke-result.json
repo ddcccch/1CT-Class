@@ -1,0 +1,359 @@
+{
+  "startedAt": "2026-10-17T05:03:10.754Z",
+  "finishedAt": "2026-10-17T05:03:24.716Z",
+  "source": "desktop",
+  "packagedInfo": null,
+  "edge": "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+  "userDataDir": "C:\\Users\\兑\\AppData\\Local\\Temp\\auto3ct-smoke-profile-BbRtun",
+  "harness": "http://127.0.0.1:53488/tests/desktop-smoke.html",
+  "checks": [
+    {
+      "name": "面板已挂载（data-testid=a3-panel）",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "标题为「3CT 自动业务」",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "初始状态为「未启动」",
+      "ok": true,
+      "detail": "未启动",
+      "kind": "assert"
+    },
+    {
+      "name": "预览开关默认勾选",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "三模块 checkbox 存在",
+      "ok": true,
+      "detail": "{\"a3-module-unirun\":false,\"a3-module-club\":false,\"a3-module-ek\":false}",
+      "kind": "assert"
+    },
+    {
+      "name": "三模块默认未勾选",
+      "ok": true,
+      "detail": "{\"a3-module-unirun\":false,\"a3-module-club\":false,\"a3-module-ek\":false}",
+      "kind": "assert"
+    },
+    {
+      "name": "账号下拉初始为占位（未自动选择）",
+      "ok": true,
+      "detail": "value=",
+      "kind": "assert"
+    },
+    {
+      "name": "校区下拉初始为占位（未自动选择）",
+      "ok": true,
+      "detail": "value=",
+      "kind": "assert"
+    },
+    {
+      "name": "取消 confirm 后仍是预览模式",
+      "ok": true,
+      "detail": "checked=true",
+      "kind": "assert"
+    },
+    {
+      "name": "取消 confirm 后引擎配置仍 dryRun=true",
+      "ok": true,
+      "detail": "true",
+      "kind": "assert"
+    },
+    {
+      "name": "接受 confirm 后预览开关关闭",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "真实模式已同步进引擎配置（dryRun=false）",
+      "ok": true,
+      "detail": "false",
+      "kind": "assert"
+    },
+    {
+      "name": "未启用模块时真实启动被阻断（状态未启动）",
+      "ok": true,
+      "detail": "未启动",
+      "kind": "assert"
+    },
+    {
+      "name": "未启用模块：writes=0",
+      "ok": true,
+      "detail": "writes=0",
+      "kind": "assert"
+    },
+    {
+      "name": "未启用模块：日志含阻断原因",
+      "ok": true,
+      "detail": "已切换为真实执行（会真实提交） | 无法启动真实执行：没有启用任何业务模块",
+      "kind": "assert"
+    },
+    {
+      "name": "启用 unirun 但未选账号：真实启动被阻断",
+      "ok": true,
+      "detail": "未启动",
+      "kind": "assert"
+    },
+    {
+      "name": "启用 unirun 但未选账号：writes=0",
+      "ok": true,
+      "detail": "writes=0",
+      "kind": "assert"
+    },
+    {
+      "name": "未选账号：日志含 need account 原因",
+      "ok": true,
+      "detail": "无法启动真实执行：没有启用任何业务模块 | 配置已保存：unirun.enabled = true | 无法启动真实执行：未选择校园跑/俱乐部账号；校园跑已启用但未选择校区",
+      "kind": "assert"
+    },
+    {
+      "name": "4c 前置：账号下拉有可选项",
+      "ok": true,
+      "detail": "account=acc-fake-1",
+      "kind": "assert"
+    },
+    {
+      "name": "只选账号未选校区：真实启动被阻断",
+      "ok": true,
+      "detail": "未启动",
+      "kind": "assert"
+    },
+    {
+      "name": "只选账号未选校区：writes=0",
+      "ok": true,
+      "detail": "writes=0",
+      "kind": "assert"
+    },
+    {
+      "name": "未选校区：日志含 need campus 原因",
+      "ok": true,
+      "detail": "无法启动真实执行：未选择校园跑/俱乐部账号；校园跑已启用但未选择校区 | 配置已保存：accountId = acc-fake-1 | 无法启动真实执行：校园跑已启用但未选择校区",
+      "kind": "assert"
+    },
+    {
+      "name": "三模块 enable 已写入配置",
+      "ok": true,
+      "detail": "{\"u\":true,\"c\":true,\"e\":true}",
+      "kind": "assert"
+    },
+    {
+      "name": "账号下拉选择已落盘",
+      "ok": true,
+      "detail": "accountId=acc-fake-1",
+      "kind": "assert"
+    },
+    {
+      "name": "校区下拉选择已落盘",
+      "ok": true,
+      "detail": "campusId=campus-1",
+      "kind": "assert"
+    },
+    {
+      "name": "真实执行前置条件已满足（无阻断）",
+      "ok": true,
+      "detail": "真实执行前置条件已满足（真实提交！）",
+      "kind": "assert"
+    },
+    {
+      "name": "真实执行 fake 写调用 > 0（非假成功）",
+      "ok": true,
+      "detail": "before=0 after=1",
+      "kind": "assert"
+    },
+    {
+      "name": "真实执行状态为「运行中（真实提交）」",
+      "ok": true,
+      "detail": "运行中（真实提交）",
+      "kind": "assert"
+    },
+    {
+      "name": "真实执行写入去重状态 auto3ct:state",
+      "ok": true,
+      "detail": "{\"done\":{\"2026-10-17|acc-fake-1|unirun|daily|run\":1792213396324},\"inflight\":{},\"failed\":{},\"usedImages\":{},\"daily\":{},\"qrChecks\":{},\"watchedEk\":{}}",
+      "kind": "assert"
+    },
+    {
+      "name": "同日去重：再次真实启动不重复 unirun.autoRun",
+      "ok": true,
+      "detail": "before=1 after=1",
+      "kind": "assert"
+    },
+    {
+      "name": "切回预览模式并同步引擎配置",
+      "ok": true,
+      "detail": "true",
+      "kind": "assert"
+    },
+    {
+      "name": "运行中「立即预览」按钮被禁用（busy 状态可见）",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "busy 期间重复点击只产生一轮调用",
+      "ok": true,
+      "detail": "rounds 1→2",
+      "kind": "assert"
+    },
+    {
+      "name": "预览连点期间无写调用",
+      "ok": true,
+      "detail": "writes=1",
+      "kind": "assert"
+    },
+    {
+      "name": "停止后飞行中的结果仍写入日志",
+      "ok": true,
+      "detail": "rounds 2→3",
+      "kind": "assert"
+    },
+    {
+      "name": "停止日志存在",
+      "ok": true,
+      "detail": "[unirun] autoRun daily → skipped（already-done） | 本轮：成功 0 / 失败 0 / 未知 0 / 等待 0 / 预览 0 / 跳过 1",
+      "kind": "assert"
+    },
+    {
+      "name": "停止后按钮恢复可用",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "停止后状态为未启动",
+      "ok": true,
+      "detail": "未启动",
+      "kind": "assert"
+    },
+    {
+      "name": "UI 保存二课关键词落盘",
+      "ok": true,
+      "detail": "{\"enabled\":true,\"keywords\":[\"歌手\",\"讲座\"],\"allowAll\":false,\"apply\":false,\"signIn\":true,\"signOut\":false,\"dailyLimit\":1,\"qrDelayMinutes\":2,\"qrRetryMinutes\":2,\"qrMaxAttempts\":3}",
+      "kind": "assert"
+    },
+    {
+      "name": "空关键词 + allowAll 落盘",
+      "ok": true,
+      "detail": "{\"enabled\":true,\"keywords\":[],\"allowAll\":true,\"join\":false,\"signIn\":false,\"signOut\":false,\"dailyJoinLimit\":1}",
+      "kind": "assert"
+    },
+    {
+      "name": "面板宽度 480px（近景可读）",
+      "ok": true,
+      "detail": "width=482",
+      "kind": "assert"
+    },
+    {
+      "name": "label 未被挤成三列（宽度充足、横向排版）",
+      "ok": true,
+      "detail": "{\"width\":130,\"height\":15.390625,\"writingMode\":\"horizontal-tb\"}",
+      "kind": "assert"
+    },
+    {
+      "name": "滚动后二维码参数可见（延迟/重试/次数）",
+      "ok": true,
+      "detail": "{\"二维码延迟（分钟）\":true,\"重试间隔（分钟）\":true,\"最多尝试次数\":true}",
+      "kind": "assert"
+    },
+    {
+      "name": "窄屏下不超出视口",
+      "ok": true,
+      "detail": "x=6 width=406 viewport=420",
+      "kind": "assert"
+    },
+    {
+      "name": "窄屏面板宽度规格",
+      "ok": true,
+      "detail": "width=406（CSS calc(100vw - 16px) 媒体查询）",
+      "kind": "info"
+    },
+    {
+      "name": "重开恢复：上次启用则自动恢复运行",
+      "ok": true,
+      "detail": "运行中（预览）",
+      "kind": "assert"
+    },
+    {
+      "name": "重开恢复：开关显示为已开启",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "停止后重开保持「未启动」",
+      "ok": true,
+      "detail": "未启动",
+      "kind": "assert"
+    },
+    {
+      "name": "重开后配置与模块开关保留",
+      "ok": true,
+      "detail": "{\"ek\":[\"歌手\",\"讲座\"],\"accountId\":\"acc-fake-1\"}",
+      "kind": "assert"
+    },
+    {
+      "name": "状态页显示脱敏手机号",
+      "ok": true,
+      "detail": "二课账号：20230001\n校园跑账号：138****0000\n账号列表：● acc-fake-1（测试账号）",
+      "kind": "assert"
+    },
+    {
+      "name": "页面不含完整手机号",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "页面不含密码/token 明文",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "全程无外部网络请求",
+      "ok": true,
+      "detail": "0 external requests",
+      "kind": "assert"
+    },
+    {
+      "name": "全程无页面 JS 异常",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    },
+    {
+      "name": "页面无 console.error",
+      "ok": true,
+      "detail": "",
+      "kind": "assert"
+    }
+  ],
+  "passed": 54,
+  "failed": 0,
+  "externalRequests": [],
+  "pageErrors": [],
+  "consoleErrors": [],
+  "screenshots": [
+    "desktop-smoke-01-initial.png",
+    "desktop-smoke-02-real-blocked.png",
+    "desktop-smoke-03-modules-selected.png",
+    "desktop-smoke-04-real-run-fake.png",
+    "desktop-smoke-05-config-saved.png",
+    "desktop-smoke-06-allowall.png",
+    "desktop-smoke-07-qr-params.png",
+    "desktop-smoke-08-narrow.png",
+    "desktop-smoke-09-reopened-running.png",
+    "desktop-smoke-10-reopened-stopped.png",
+    "desktop-smoke-11-state-masked.png"
+  ]
+}
