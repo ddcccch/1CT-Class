@@ -472,3 +472,15 @@
     width: 100%;
   }
 }
+
+/* ---------- 主操作按钮（结果看板等） ---------- */
+
+.a3-btn-primary {
+  border-color: rgba(79, 140, 255, 0.55);
+  background: rgba(79, 140, 255, 0.22);
+  color: #cfe0ff;
+}
+
+.a3-btn-primary:hover {
+  background: rgba(79, 140, 255, 0.32);
+}

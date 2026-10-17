@@ -157,6 +157,106 @@
   }
 
   var engine = null;
+  var resultStore = null;
+
+  /** 结果仓库（window.Auto3CTResults；缺失时降级为 null，不影响面板主流程）。 */
+  function ensureResultStore() {
+    if (resultStore) return resultStore;
+    try {
+      var R = window.Auto3CTResults || window.Auto3CTResultStore || null;
+      if (!R || typeof R.createStore !== 'function') return null;
+      resultStore = R.createStore({
+        storage: {
+          get: function (key) { return window.localStorage.getItem(key); },
+          set: function (key, value) { window.localStorage.setItem(key, value); },
+          remove: function (key) { window.localStorage.removeItem(key); },
+        },
+        clock: { now: function () { return Date.now(); } },
+      });
+    } catch (e) {
+      pushLog('warn', '结果仓库初始化失败：' + (e && e.message ? e.message : String(e)));
+      resultStore = null;
+    }
+    return resultStore;
+  }
+
+  function refreshDashboard() {
+    try {
+      if (
+        window.Auto3CTDashboard &&
+        typeof window.Auto3CTDashboard.isOpen === 'function' &&
+        window.Auto3CTDashboard.isOpen()
+      ) {
+        window.Auto3CTDashboard.refresh();
+      }
+    } catch (e) {
+      /* 看板刷新失败不影响自动化主流程 */
+    }
+  }
+
+  /** engine 真实提交定论回调（dry-run 不回调）→ 结果仓库。 */
+  function recordResultEvent(row) {
+    try {
+      var store = ensureResultStore();
+      if (!store || !row) return;
+      var ok = store.append(row);
+      if (ok === false) {
+        var info = store.retentionInfo ? store.retentionInfo() : null;
+        var why = (info && (info.persistenceError || (info.corrupt ? 'storage-corrupt' : ''))) || 'storage-write-failed';
+        pushLog('warn', '执行结果未能保存到本地历史（' + why + '）：看板将提示保存失败。');
+      }
+      refreshDashboard();
+    } catch (e) {
+      pushLog('warn', '记录执行结果失败：' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  /** 每轮结果（含 waiting/failed）→ 结果仓库；preview/dry-run 轮由 store 忽略。 */
+  function recordRoundResult(result) {
+    try {
+      var store = ensureResultStore();
+      if (!store || !result) return;
+      var round = store.recordRound(result);
+      if (round && round.persistenceError) {
+        pushLog('warn', '本轮结果未能保存到本地历史（' + round.persistenceError + '）：看板将提示保存失败。');
+      }
+      refreshDashboard();
+    } catch (e) {
+      pushLog('warn', '记录本轮结果失败：' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  function openDashboard() {
+    try {
+      if (!window.Auto3CTDashboard || typeof window.Auto3CTDashboard.open !== 'function') {
+        pushLog('warn', '看板脚本 dashboard.js 未加载，暂时无法打开结果看板。');
+        return;
+      }
+      var inst = ensureEngine();
+      var accounts = { ekAccount: '', unirunAccountId: '' };
+      try {
+        var profiles = inst.getProfiles() || {};
+        accounts.ekAccount = profiles.ekAccount ? String(profiles.ekAccount) : '';
+        if (profiles.unirunAccountId) {
+          accounts.unirunAccountId = String(profiles.unirunAccountId);
+        } else if (Array.isArray(profiles.unirunAccounts)) {
+          profiles.unirunAccounts.forEach(function (item) {
+            if (item && item.selected && item.id) accounts.unirunAccountId = String(item.id);
+          });
+        }
+      } catch (e) {
+        /* profiles 不可用时看板自行降级 */
+      }
+      window.Auto3CTDashboard.open({
+        engine: inst,
+        store: ensureResultStore(),
+        accountId: accounts.ekAccount,
+        accounts: accounts,
+      });
+    } catch (e) {
+      pushLog('error', '打开结果看板失败：' + (e && e.message ? e.message : String(e)));
+    }
+  }
 
   function ensureEngine() {
     if (engine) return engine;
@@ -172,6 +272,7 @@
           pushLog('engine', String(message));
         },
       },
+      onResult: recordResultEvent,
     });
     return engine;
   }
@@ -568,6 +669,7 @@
         state.lastRunAt = Date.now();
         state.lastSummary = result.summary || null;
         applyResultToLogs(result);
+        recordRoundResult(result);
         renderSummary();
         return result;
       })
@@ -636,6 +738,21 @@
         else if (k === 'text') node.textContent = attrs[k];
         else if (k === 'html') node.innerHTML = attrs[k];
         else if (k === 'value') node.value = attrs[k];
+        else if (
+          k === 'disabled' || k === 'checked' || k === 'selected' ||
+          k === 'hidden' || k === 'readOnly' || k === 'readonly'
+        ) {
+          var enabledValue = attrs[k] === true || attrs[k] === 'true' || attrs[k] === 1 || attrs[k] === '1';
+          var attrNameP = k === 'readOnly' ? 'readonly' : k;
+          var propNameP = k === 'readonly' ? 'readOnly' : k;
+          if (enabledValue) node.setAttribute(attrNameP, '');
+          else node.removeAttribute(attrNameP);
+          try {
+            node[propNameP] = enabledValue;
+          } catch (e) {
+            /* ignore */
+          }
+        }
         else if (k.indexOf('on') === 0 && typeof attrs[k] === 'function') {
           node.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
         } else if (attrs[k] !== undefined && attrs[k] !== null) node.setAttribute(k, attrs[k]);
@@ -778,7 +895,18 @@
         ]),
         h('div', { class: 'a3-row-actions' }, [dryLabel, toggle]),
       ]),
-      h('div', { class: 'a3-inline-btns' }, [previewBtn, runBtn]),
+      h('div', { class: 'a3-inline-btns' }, [
+        previewBtn,
+        runBtn,
+        h('button', {
+          class: 'a3-btn a3-btn-primary',
+          type: 'button',
+          text: '结果看板',
+          'data-testid': 'a3-open-dashboard',
+          title: '打开全屏自动化看板（积分缺口 / 执行记录 / 补分管理）',
+          onclick: openDashboard,
+        }),
+      ]),
       h('div', { class: 'a3-hint a3-prereq', id: 'a3-prereq' }),
     ]);
   }
