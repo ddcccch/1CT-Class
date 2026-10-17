@@ -201,7 +201,8 @@ test('连续 3 次 preview 不消耗 QR 尝试预算，随后真跑仍可签到'
   const storage = baseStorage();
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      // 签到场景：活动必须已报名（列表 status=1）
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: {
         items: [
@@ -377,7 +378,7 @@ test('二课已报名（ApplyInfo 存在 / ActivityStatus=1）不再报名', asy
 test('二课 SignWay=1 且窗口内、boundImages 有有效码 → signByQr(QD)', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: {
         items: [
@@ -404,7 +405,7 @@ test('二课 SignWay=1 且窗口内、boundImages 有有效码 → signByQr(QD)'
 test('二课 SignWay 缺失 → waiting-material（明确等待签到方式，不猜）', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail({}, { SignWay: undefined, SignWayText: '' }),
     },
   });
@@ -423,7 +424,7 @@ test('二课 SignWay 缺失 → waiting-material（明确等待签到方式，�
 test('二课 SignWay=2（拍照）→ waiting-material need-manual-sign-way', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
     },
   });
@@ -442,7 +443,7 @@ test('二课 SignWay=2（拍照）→ waiting-material need-manual-sign-way', as
 test('二课无可用二维码 → waiting-material，不提交、不假成功', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: { items: [{ id: 'i', file_url: 'https://x/1.png' }] },
     },
@@ -466,7 +467,7 @@ test('二课无可用二维码 → waiting-material，不提交、不假成功',
 test('二课已签到（SignD=已签到）跳过，不重复提交', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail({}, { ActivityListInfo: { ActivitySignInfo: { SignD: '已签到' } } }),
       activityBoundImages: { items: [{ id: 'i', file_url: 'https://x/1.png' }] },
     },
@@ -486,7 +487,7 @@ test('二课已签到（SignD=已签到）跳过，不重复提交', async () =>
 test('二课未到窗口不执行；不需要签退则不安排签退', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail({}, { IsNeedSignOutText: '否' }),
     },
   });
@@ -670,7 +671,7 @@ test('二课 SignWay=1：延迟 gate 前不拉图库，到 gate 才拉一次', a
   let boundCalls = 0;
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: () => {
         boundCalls += 1;
@@ -705,7 +706,7 @@ test('二课图库为空后按 retry 间隔重试，最多 maxAttempts 次', asy
   let boundCalls = 0;
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: () => {
         boundCalls += 1;
@@ -743,7 +744,7 @@ test('二课图库为空后按 retry 间隔重试，最多 maxAttempts 次', asy
 test('二维码延迟超过官方窗口 → 明确提示 delay-exceeds-window，不静默永不触发', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail({}, { ActivityQDDate: '2026-09-21 18:00:00 至 2026-09-21 18:01:00' }),
       activityBoundImages: { items: [] },
     },
@@ -762,7 +763,7 @@ test('metadata=签到 但 suffix=QT → 冲突拒绝（不得当签到码使用�
   let signCalled = 0;
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: {
         items: [
@@ -801,7 +802,7 @@ test('签退不得复用签到已用图片（跨阶段排除）', async () => {
   };
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: { items: [shared] },
       signByQr: { errcode: 0 },
@@ -830,7 +831,7 @@ test('opaque lbUUh 无元数据/无上传时间 → 不接受（不假定阶段�
   let signCalled = 0;
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: { items: [{ id: 'opaque-1', file_url: 'https://x/o.png' }] },
       signByQr: () => {
@@ -853,7 +854,7 @@ test('opaque lbUUh 无元数据/无上传时间 → 不接受（不假定阶段�
 test('opaque lbUUh 但上传时间在窗口内 → 可接受（延迟上传场景）', async () => {
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
       getActivityDetail: ekDetail(),
       activityBoundImages: {
         items: [{ id: 'new-1', file_url: 'https://x/n.png', created_at: '2026-09-21 18:03:00' }],
@@ -1174,11 +1175,17 @@ test('malformed 响应 → unknown，跨两轮 call 只 1 次', async () => {
   assert.equal(api.__count('ek.applyActivity'), 1);
 });
 
-test('stop 后不再提交后续动作', async () => {
+test('stop 后不再提交后续动作（deferred read pending → stop → resolve → apply 0）', async () => {
+  let releaseDetail = null;
   const api = makeApi({
     ek: {
-      getActivitiesList: { List: { Items: [ekItem()] } },
-      getActivityDetail: ekDetail(),
+      // 报名场景：列表可报名 + 详情未报名
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '0' })], TotalPages: 1 } },
+      // 详情读取挂起：模拟网络在途时用户点停止
+      getActivityDetail: () =>
+        new Promise((resolve) => {
+          releaseDetail = () => resolve(ekDetail({}, {}, null));
+        }),
       applyActivity: { errcode: 0 },
     },
   });
@@ -1187,9 +1194,16 @@ test('stop 后不再提交后续动作', async () => {
     clock: makeClock(BJ(2026, 9, 21, 8, 0)),
     config: { ek: { keywords: ['歌手'] } },
   });
+  const running = engine.runOnce();
+  // 等详情请求真正挂起
+  for (let i = 0; i < 50 && !releaseDetail; i += 1) {
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  assert.equal(typeof releaseDetail, 'function', '应已挂起在详情读取');
   engine.stop();
-  await engine.runOnce();
-  assert.equal(api.__count('ek.applyActivity'), 0);
+  releaseDetail();
+  await running;
+  assert.equal(api.__count('ek.applyActivity'), 0, '停止后本轮不得继续提交');
 });
 
 test('并发 runOnce：第二个返回 busy，不重复提交', async () => {

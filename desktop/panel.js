@@ -581,6 +581,108 @@
     }, nextIntervalMs(result));
   }
 
+  // ── 报名/签到决策中文日志（仅展示，保留 reason code 便于排错） ──
+  var REASON_CN = {
+    'before-apply-window': '未到报名时间', 'before-window': '未到签到/签退时间',
+    'apply-window-passed': '报名窗口已过', 'window-passed': '签到/签退窗口已过',
+    'missing-apply-window': '缺少报名窗口信息', 'already-applied': '已报名',
+    'already-applied-conflict': '查询冲突按已报名处理', 'daily-limit-reached': '达到每日上限',
+    'module-satisfied': '该模块积分已达标', 'category-unknown': '活动类别无法映射',
+    'need-keywords': '未配置关键词', 'score-snapshot-missing': '积分快照未导入',
+    'score-account-mismatch': '积分账号不匹配', 'score-untrusted': '积分数据不可信',
+    'score-stale': '积分数据过期', 'score-refresh-failed': '积分刷新失败',
+    'policy-disabled': '缺口策略已关闭', 'upstream-rejected': '上游拒绝',
+    'submission-result-unknown': '提交结果未知（不自动重试）', 'need-sign-in-first': '需先签到',
+    'need-coords': '缺少定位坐标', 'need-sign-way': '缺少签到方式',
+    'need-manual-sign-way': '需人工选择签到方式', 'need-qr-or-manual': '需二维码或人工签到',
+    'qr-retry-pending': '二维码重试等待中', 'qr-attempts-exhausted': '二维码尝试次数用尽',
+    'already-done': '今日已完成', 'already-done-upstream': '上游显示已完成',
+    'past-deadline': '已过截止时间', 'stopped': '已停止', 'state-corrupt': '去重状态损坏',
+    'storage-error': '本地存储失败', 'previous-result-unknown': '上次结果未知已锁定',
+    'locked-failed': '上次失败已锁定', 'locked-unknown': '上次结果未知已锁定',
+    'no-candidate': '未发现候选活动', 'api-unavailable': '接口不可用',
+    'ek-not-logged-in': '二课未登录', 'no-ek-session': '二课未登录',
+    'no-unirun-account': '未选择校园跑账号', 'campus-not-found': '未找到校区',
+    'apply-state-unknown': '报名状态待确认', 'apply-disabled': '自动报名已关闭',
+    'unexpected-list-shape': '活动列表结构异常', 'scan-complete': '扫描完成',
+    'preview-only': '预览模式（不提交）', 'not-applied': '未报名',
+  };
+  var DECISION_CN = {
+    applicable: '可报名（待提交）', applied: '已报名', 'already-applied': '已报名',
+    'score-blocked': '积分阻断', 'module-satisfied': '模块已达标', 'category-unknown': '类别待确认',
+    'keyword-filtered': '关键词不匹配', 'window-waiting': '未到报名时间',
+    'window-expired': '报名窗口已过', 'daily-limit': '达到每日上限', unknown: '状态待确认',
+  };
+  var ACTION_CN = {
+    apply: '报名', join: '报名', signIn: '签到', 'sign-in': '签到', signOut: '签退',
+    'sign-out': '签退', run: '跑步', autoRun: '跑步', list: '扫描', detail: '读取详情',
+  };
+  var MODULE_CN = { ek: '二课', club: '俱乐部', unirun: '校园跑' };
+
+  function enrollReasonCn(reason) {
+    var code = String(reason === undefined || reason === null ? '' : reason);
+    if (!code) return '';
+    return REASON_CN[code] ? REASON_CN[code] + '(' + code + ')' : code;
+  }
+
+  function enrollDecisionCn(r) {
+    var status = String(r.status || '');
+    // 真实结果/预览优先：不能因为 classify=joinable 淡化 failed/unknown/预览
+    if (status === 'success') {
+      if (r.action === 'apply' || r.action === 'join') return '报名成功';
+      return (ACTION_CN[r.action] || r.action || '动作') + '成功';
+    }
+    if (status === 'failed') return '失败';
+    if (status === 'unknown') return '结果未知（需人工确认）';
+    if (status === 'dry-run') return '预览（不提交）';
+    if (status === 'blocked') {
+      return r.scoreGate === 'module-satisfied' ? '模块已达标' : '积分阻断';
+    }
+    var decision = String(r.decision || '');
+    if (decision === 'applicable') return '可报名（待提交）';
+    if (decision && DECISION_CN[decision]) return DECISION_CN[decision];
+    var byStatus = {
+      'not-yet': r.action === 'apply' ? '未到报名时间' : '未到签到/签退时间',
+      expired: r.action === 'apply' ? '报名窗口已过' : '签到/签退窗口已过',
+      skipped: '已跳过',
+      'waiting-material': '等待材料',
+    };
+    if (byStatus[status]) return byStatus[status];
+    // classify 仅作为最后兜底
+    if (r.classify === 'joinable') return '可报名（待提交）';
+    if (r.classify === 'applied') return '已报名';
+    if (r.classify === 'unknown') return '状态待确认';
+    return '状态待确认';
+  }
+
+  function formatEnrollRow(r) {
+    var action = ACTION_CN[r.action] || r.action || '';
+    var prefix = r.module === 'ek' ? '二课' + action : (MODULE_CN[r.module] || r.module || '未知') + action;
+    var name = String(r.activityName || r.name || '').trim();
+    if (name.length > 40) name = name.slice(0, 40) + '…';
+    if (!name) {
+      var shortId = String(r.activityId || '').slice(0, 8);
+      name = '活动#' + (shortId || '未知');
+    }
+    var line = prefix + '｜' + name + '｜' + enrollDecisionCn(r);
+    var reason = enrollReasonCn(r.reason);
+    return reason ? line + '｜' + reason : line;
+  }
+
+  function formatEkScan(scan) {
+    if (!scan || typeof scan !== 'object') return '';
+    var parts = [
+      ['fetched', '抓取'], ['eligible', '候选'], ['joinable', '可报名'], ['applied', '已报'],
+      ['unknown', '待确认'], ['filtered', '过滤'], ['nextpages', '页数'],
+    ].map(function (pair) {
+      var value = scan[pair[0]];
+      // 字段缺失/非数字显示「—」，绝不假造成 0
+      return pair[1] + ' ' + (typeof value === 'number' && isFinite(value) ? String(value) : '—');
+    });
+    if (typeof scan.truncated === 'boolean') parts.push('截断 ' + (scan.truncated ? '是' : '否'));
+    return '二课扫描：' + parts.join(' / ');
+  }
+
   function applyResultToLogs(result) {
     if (!result || !result.results) {
       pushLog('warn', '本轮无结果');
@@ -595,14 +697,13 @@
       return;
     }
     result.results.forEach(function (r) {
-      var line =
-        '[' + r.module + '] ' + r.action + (r.activityId ? ' ' + r.activityId : '') + ' → ' + r.status;
-      if (r.reason) line += '（' + r.reason + '）';
       pushLog(
         r.status === 'success' ? 'success' : r.status === 'failed' || r.status === 'unknown' ? 'error' : 'info',
-        line,
+        formatEnrollRow(r),
       );
     });
+    var scanLine = formatEkScan(result.ekScan);
+    if (scanLine) pushLog('info', scanLine);
     var s = result.summary || {};
     pushLog(
       'info',
@@ -1319,6 +1420,13 @@
     stop: stop,
     getLogs: function () {
       return logs.slice();
+    },
+    // 供离线验收脚本直接验证日志格式化（纯函数、无副作用、不含 PII）
+    _enrollLog: {
+      formatRow: formatEnrollRow,
+      formatScan: formatEkScan,
+      reasonCn: enrollReasonCn,
+      decisionCn: enrollDecisionCn,
     },
   };
 })();

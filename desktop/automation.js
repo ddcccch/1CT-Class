@@ -287,9 +287,13 @@
     return '';
   }
 
+  /**
+   * 列表层面的「已报名」判定：只认官方 ActivityStatus==='1'。
+   * 注意：不再把 item.ApplyInfo 的存在当作已报名 —— 模板 ApplyInfo 会被误判（task-12）。
+   * 需 detail 证据时用 ekApplyState()。
+   */
   function ekApplied(item) {
-    if (ekActivityStatus(item) === '1') return true;
-    return Boolean(item && item.ApplyInfo);
+    return ekActivityStatus(item) === '1';
   }
 
   function signStatusOf(info, key) {
@@ -301,23 +305,62 @@
   }
 
   /**
-   * 报名状态判定：
-   *  - 列表 ActivityStatus=1 → 已报名；
-   *  - 详情 ApplyInfo.Id 非空 → 已报名（3CT 自身用 ApplyInfo.Id 作为签到表单的 signId，
-   *    真实详情里「已报名」就是带 Id 的 ApplyInfo）；
-   *  - 列表 ActivityStatus=0 且无有效 ApplyInfo → 可报名；
-   *  - 其余（结构异常）→ unknown，不猜、不自动报名/签到。
+   * 报名状态判定（task-12 修正，状态优先级）：
+   *  1. 列表官方 `ActivityStatus==='1'` → applied（最高优先）
+   *  2. 列表官方 `ActivityStatus==='0'` → joinable（**可报名优先，绝不被模板 ApplyInfo 覆盖**）
+   *  3. 列表状态缺失/unknown 时才 fallback 到 detail.ApplyInfo，且要求可信证据：
+   *     - `Id` 非空、非全零 GUID 占位、非全零数字
+   *     - 且 `ActivityId` 可信（非空、非占位、且等于当前活动 id）
+   *     - 空对象 `{}` / 模板默认字段绝不当作已报名
+   *  4. 其余 → unknown（不猜、不自动报名/签到）
+   *
+   * 不要求 Id 必须是 GUID（旧数据里 numeric id 也合法）。
    */
-  function ekApplyState(item, detail) {
-    if (ekApplied(item)) return 'applied';
+  function ekApplyState(item, detail, activityId) {
+    var listStatus = ekActivityStatus(item);
+    if (listStatus === '1') return 'applied';
+    if (listStatus === '0') return 'joinable';
+
+    // 列表状态缺失：才需要 detail 证据
     var applyInfo = detail && detail.ApplyInfo;
     if (applyInfo && typeof applyInfo === 'object') {
       var idText = applyInfo.Id != null ? String(applyInfo.Id).trim() : '';
-      if (idText) return 'applied';
-      if (Object.keys(applyInfo).length > 0) return 'unknown'; // 有字段但无 Id：不猜
+      var actText = applyInfo.ActivityId != null ? String(applyInfo.ActivityId).trim() : '';
+      var expectedId = activityId != null ? String(activityId).trim() : '';
+
+      var idUsable = isTrustedIdentifier(idText);
+      var actMatches = isTrustedIdentifier(actText) ? (!expectedId || actText === expectedId) : false;
+
+      if (idUsable && actMatches) return 'applied';
+      if (idText || actText) return 'unknown'; // 有字段但证据不可信：不猜
+      if (Object.keys(applyInfo).length > 0) return 'unknown'; // 模板字段但无 Id：不猜
+      // 完全空对象 {}：不是已报名证据
     }
-    if (ekActivityStatus(item) === '0') return 'joinable';
     return 'unknown';
+  }
+
+  /** 全零 GUID / 全零数字等占位符不算可信标识 */
+  function isTrustedIdentifier(value) {
+    var v = String(value == null ? '' : value).trim();
+    if (!v) return false;
+    if (/^0+$/.test(v)) return false;
+    if (/^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(v)) return false;
+    if (/^[0-]+$/.test(v)) return false;
+    return true;
+  }
+
+  /** detail.ApplyInfo 是否含「非占位 Id」——用于诊断字段 hasApplyId */
+  function hasUsableApplyId(applyInfo) {
+    if (!applyInfo || typeof applyInfo !== 'object') return false;
+    return isTrustedIdentifier(applyInfo.Id);
+  }
+
+  /** detail.ApplyInfo 是否只是模板/占位（无有效报名证据） */
+  function isPlaceholderApplyInfo(applyInfo) {
+    if (!applyInfo || typeof applyInfo !== 'object') return false;
+    var idText = applyInfo.Id != null ? String(applyInfo.Id).trim() : '';
+    var actText = applyInfo.ActivityId != null ? String(applyInfo.ActivityId).trim() : '';
+    return !isTrustedIdentifier(idText) && !isTrustedIdentifier(actText);
   }
 
   function clubActivityId(item) {
@@ -456,6 +499,8 @@
     var runtimeConfig = mergeConfig(DEFAULTS, opts.config || {});
     var stopped = false;
     var running = false;
+    /** 最近一次二课扫描汇总（safe 字段，供日志/看板展示为什么没报名） */
+    var lastEkScan = null;
     /**
      * 预览模式标记：true 时 saveState 一律不落盘。
      * 目的：预览可以看到「将要做什么」，但绝不能消耗真实预算
@@ -742,11 +787,27 @@
       return policy;
     }
 
-    /** 活动类别解析：detail.ModuleCodeText 优先，其次 ModuleCode → 官方选项映射 */
-    function resolveCategory(config, detailInfo, listItem) {
+    /**
+     * 活动类别解析（严格）：detail.ModuleCodeText 精确优先；
+     * 否则用列表 ModuleCode 在官方 ModuleCodeList（per-run 捕获，其次 config）里 value→label 精确映射。
+     * 绝不凭标题/字母猜。
+     */
+    function resolveCategory(config, detailInfo, listItem, runModuleOptions) {
       if (!ScorePolicy) return { category: null, reason: 'policy-unavailable', via: null };
       var cfg = (config.ek && config.ek.scorePolicy) || DEFAULTS.ek.scorePolicy;
-      var options = Array.isArray(cfg.moduleOptions) ? cfg.moduleOptions : [];
+      var options = Array.isArray(runModuleOptions) && runModuleOptions.length > 0
+        ? runModuleOptions
+        : Array.isArray(cfg.moduleOptions)
+          ? cfg.moduleOptions
+          : [];
+      // 官方 ModuleCodeList 也可能出现在详情里（兼容两种来源，仍要求 label/value 精确）
+      if (options.length === 0 && detailInfo && Array.isArray(detailInfo.ModuleCodeList)) {
+        options = detailInfo.ModuleCodeList.map(function (it) {
+          var label = String(it && (it.label != null ? it.label : it.Label != null ? it.Label : '')).trim();
+          var value = String(it && (it.value != null ? it.value : it.Value != null ? it.Value : '')).trim();
+          return { label: label, value: value };
+        }).filter(function (o) { return o.label && o.value; });
+      }
       return ScorePolicy.resolveActivityCategory({
         detailInfo: detailInfo,
         listItem: listItem,
@@ -931,7 +992,13 @@
             reason = 'upstream-rejected';
           }
           emitResult(meta, status, reason);
-          return row(meta.module, meta.action, meta.activityId, status, reason, { key: key });
+          // 合并 meta 中的安全诊断字段，便于日志定位
+          var diagExtra = { key: key };
+          ['accountId', 'activityName', 'category', 'listStatus', 'classify', 'decision', 'scoreGate', 'applyWindowStart', 'applyWindowEnd', 'stage', 'distanceMeters'].forEach(function (k) {
+            if (meta[k] !== undefined) diagExtra[k] = meta[k];
+          });
+          if (status === 'success') diagExtra.decision = 'applicable';
+          return row(meta.module, meta.action, meta.activityId, status, reason, diagExtra);
         })
         .catch(function (e) {
           delete state.inflight[key];
@@ -1367,48 +1434,181 @@
       var account = accountFor(config, 'ek');
       var today = beijingDateString(now());
       var watched = (state.watchedEk && state.watchedEk[account]) || {};
-      var candidates = {}; // id -> { item?, watched?: true }
+      var candidates = {}; // id -> { item?, watched?, status1?: bool, conflict?: bool }
 
-      // 1) 列表发现（最多 5 页，避免只依赖 page1）：只收关键词命中且状态可用的
-      var pages = [];
-      var maxPages = Math.max(1, Math.min(5, Number(config.ek.maxPages) || 3));
-      var chain = Promise.resolve();
-      for (var p = 1; p <= maxPages; p += 1) {
-        (function (pageIndex) {
-          chain = chain.then(function () {
-            return Promise.resolve(api.ek.getActivitiesList({ requestsData: session, pageIndex: pageIndex }))
-              .then(function (res) {
-                var items = ekListItems(res);
-                if (items === null) {
-                  if (pageIndex === 1) pages = null; // 首页结构不符：明确 unknown，不当空
-                  return;
-                }
-                pages.push(items);
-                items.forEach(function (item) {
-                  var id = ekActivityId(item);
-                  if (!id) return;
-                  if (!passesKeyword(item, config.ek)) return;
-                  var status = ekActivityStatus(item);
-                  if (status !== '0' && status !== '1') return;
-                  if (!candidates[id]) candidates[id] = {};
-                  candidates[id].item = item;
-                });
-              })
-              .catch(function (e) {
-                if (pageIndex === 1) pages = null;
-                results.push(row('ek', 'list', 'p' + pageIndex, 'unknown', sanitizeError(e)));
-              });
-          });
-        })(p);
+      /**
+       * 扫描汇总（安全字段，供日志/看板展示「为什么没报名」）
+       */
+      var scan = {
+        fetched: 0,
+        eligible: 0,
+        joinable: 0,
+        applied: 0,
+        unknown: 0,
+        filtered: 0,
+        nextpages: 0,
+        truncated: false,
+      };
+      lastEkScan = scan;
+      /** per-run 模块选项映射（来自官方 ModuleCodeList；不写配置、不全局缓存） */
+      var moduleOptions = [];
+      function captureModuleOptions(res) {
+        if (!res || typeof res !== 'object') return;
+        var list = res.ModuleCodeList;
+        if (!Array.isArray(list)) return;
+        list.forEach(function (it) {
+          if (!it || typeof it !== 'object') return;
+          var label = String(it.label != null ? it.label : it.Label != null ? it.Label : '').trim();
+          var value = String(it.value != null ? it.value : it.Value != null ? it.Value : '').trim();
+          if (!label || !value) return;
+          for (var i = 0; i < moduleOptions.length; i += 1) {
+            if (moduleOptions[i].value === value) return;
+          }
+          moduleOptions.push({ label: label, value: value });
+        });
       }
 
-      return chain
-        .then(function () {
-          if (pages === null) {
-            results.push(row('ek', 'list', '', 'unknown', 'unexpected-list-shape'));
-            return null;
+      var maxPages = Math.max(1, Math.min(20, Number(config.ek.maxPages) || 20));
+
+      /**
+       * 分页拉取某一个 activityStatus 的活动列表：
+       *  - 跟随 TotalPages 停止（不固定 3 页）
+       *  - 受 maxPages 上限约束，超限记 truncated
+       *  - 捕获 ModuleCodeList 到 per-run 映射
+       */
+      function fetchStatusPages(activityStatus) {
+        var pageIndex = 1;
+        var collected = [];
+        var firstFailed = false;
+        var pagesThisQuery = 0;
+        var declaredTotalPages = null;
+        function step() {
+          // 用户停止后不再继续抓后续页
+          if (stopped) {
+            return Promise.resolve(collected);
           }
-          // 2) 关注集合：本地 watch 的活动必须每 tick 拉详情，即使已不在列表前几页
+          if (pagesThisQuery >= maxPages) {
+            var morePending =
+              declaredTotalPages === null || Number.isFinite(declaredTotalPages)
+                ? declaredTotalPages === null || pageIndex <= declaredTotalPages
+                : false;
+            if (morePending) scan.truncated = true;
+            results.push(
+              row('ek', 'list', 'status' + activityStatus + '-truncated', 'skipped', 'page-cap-reached', {
+                activityName: '二课列表翻页',
+                listStatus: String(activityStatus),
+                pageIndex: pageIndex,
+                nextpages: pagesThisQuery,
+                totalPages: declaredTotalPages,
+                truncated: true,
+              }),
+            );
+            return Promise.resolve(collected);
+          }
+          pagesThisQuery += 1;
+          scan.nextpages += 1;
+          return Promise.resolve(
+            api.ek.getActivitiesList({
+              requestsData: session,
+              pageIndex: pageIndex,
+              activityStatus: activityStatus,
+            }),
+          )
+            .then(function (res) {
+              captureModuleOptions(res);
+              var items = ekListItems(res);
+              if (items === null) {
+                // 结构不符：明确诊断（不被 no-candidate 掩盖），不进候选
+                if (pageIndex === 1) firstFailed = true;
+                results.push(
+                  row('ek', 'list', 'status' + activityStatus + '-p' + pageIndex, 'unknown', 'unexpected-list-shape', {
+                    activityName: '二课列表返回异常',
+                    listStatus: String(activityStatus),
+                    pageIndex: pageIndex,
+                  }),
+                );
+                return collected;
+              }
+              items.forEach(function (it) {
+                collected.push(it);
+              });
+              var totalPagesRaw = res && res.List ? res.List.TotalPages : undefined;
+              var totalPages = Number(totalPagesRaw);
+              if (Number.isFinite(totalPages)) declaredTotalPages = totalPages;
+              var more = Number.isFinite(totalPages) ? pageIndex < totalPages : items.length > 0;
+              pageIndex += 1;
+              if (!more) return collected;
+              return step();
+            })
+            .catch(function (e) {
+              if (pageIndex === 1) firstFailed = true;
+              results.push(
+                row('ek', 'list', 'status' + activityStatus + '-p' + pageIndex, 'unknown', sanitizeError(e), {
+                  listStatus: String(activityStatus),
+                  pageIndex: pageIndex,
+                }),
+              );
+              return collected;
+            });
+        }
+        return step().then(function (items) {
+          return { items: items, failed: firstFailed && items.length === 0, totalPages: declaredTotalPages };
+        });
+      }
+
+      /**
+       * 合并发现结果：status=1 更可靠（已报名），与 status=0 冲突时按已报名处理，
+       * 防止两次查询快照竞态导致重复报名。
+       */
+      function mergeDiscovered(items, sourceStatus) {
+        items.forEach(function (item) {
+          var id = ekActivityId(item);
+          if (!id) return;
+          scan.fetched += 1;
+          var status = ekActivityStatus(item) || sourceStatus;
+          if (!passesKeyword(item, config.ek)) {
+            scan.filtered += 1;
+            return;
+          }
+          var entry = candidates[id] || (candidates[id] = {});
+          if (status === '1') {
+            // 已报名最可靠：覆盖此前的 status=0；这是「补充发现」的正常现象，不算冲突
+            entry.item = item;
+            entry.status1 = true;
+            if (entry.status0) entry.status0Seen = true;
+          } else if (status === '0') {
+            if (entry.status1) {
+              // 同一轮内 status=1 已确认已报名，后来的 status=0 视为快照竞态 → 冲突
+              entry.conflict = true;
+            } else {
+              entry.item = item;
+              entry.status0 = true;
+            }
+          } else {
+            if (!entry.item) entry.item = item;
+          }
+          scan.eligible += 1;
+        });
+      }
+
+      // 1) 显式查「可报名」(status=0)，再只读补充「已报名」(status=1) —— 不丢用户手动已报名
+      return Promise.resolve()
+        .then(function () {
+          return fetchStatusPages('0');
+        })
+        .then(function (joinableResult) {
+          mergeDiscovered(joinableResult.items, '0');
+          // watch 独立性：即使可报名查询失败，也不影响后续对 watch 活动拉详情
+          return fetchStatusPages('1').then(function (appliedResult) {
+            mergeDiscovered(appliedResult.items, '1');
+            return {
+              joinableFailed: joinableResult.failed,
+              appliedFailed: appliedResult.failed,
+            };
+          });
+        })
+        .then(function (scanInfo) {
+          // 2) 关注集合：watch 活动必须每 tick 拉详情（与 new discovery 独立）
           Object.keys(watched).forEach(function (id) {
             candidates[id] = candidates[id] || {};
             candidates[id].watched = true;
@@ -1417,19 +1617,35 @@
             results.push(row('ek', 'list', '', 'ok', 'no-candidate'));
             return null;
           }
-          // 3) 逐个处理
+          // 3) 逐个处理（顺序执行，便于诊断与限流）
           var run = Promise.resolve();
           Object.keys(candidates).forEach(function (id) {
             run = run.then(function () {
               if (stopped) return null;
-              return handleEkActivity(state, config, session, account, results, id, candidates[id], watched, today);
+              return handleEkActivity(state, config, session, account, results, id, candidates[id], watched, today, moduleOptions, scan);
             });
           });
-          return run;
+          return run.then(function () {
+            return scanInfo;
+          });
         })
         .then(function () {
           // 4) 清理：已过期且两阶段都完成的 watch 项
           pruneWatchedEk(state, watched);
+          // 5) 扫描汇总行：让「为什么没报名」在日志里可见（safe 字段，无 payload/token）
+          results.push(
+            row('ek', 'scan', '', 'ok', 'scan-complete', {
+              activityName: '二课扫描汇总',
+              fetched: scan.fetched,
+              eligible: scan.eligible,
+              joinable: scan.joinable,
+              applied: scan.applied,
+              unknown: scan.unknown,
+              filtered: scan.filtered,
+              nextpages: scan.nextpages,
+              truncated: scan.truncated,
+            }),
+          );
         })
         .catch(function (e) {
           results.push(row('ek', 'list', '', 'unknown', sanitizeError(e)));
@@ -1437,7 +1653,8 @@
     }
 
     /** 单个二课活动：拉详情 → 报名（可选）→ 签到/签退 → 维护 watch */
-    function handleEkActivity(state, config, session, account, results, id, candidate, watched, today) {
+    function handleEkActivity(state, config, session, account, results, id, candidate, watched, today, moduleOptions, scan) {
+      var scanRef = scan || { fetched: 0, eligible: 0, joinable: 0, applied: 0, unknown: 0, filtered: 0, nextpages: 0, truncated: false };
       return Promise.resolve(api.ek.getActivityDetail({ requestsData: session, id: id }))
         .then(function (detail) {
           var info = detail && detail.ActivityInfo && typeof detail.ActivityInfo === 'object' ? detail.ActivityInfo : null;
@@ -1445,7 +1662,12 @@
             results.push(row('ek', 'detail', id, 'unknown', 'missing-activity-info'));
             return null;
           }
-          var applyState = ekApplyState(candidate.item || {}, detail);
+          var applyState = ekApplyState(candidate.item || {}, detail, id);
+          // 同 id 两次查询状态冲突：status=1 更可靠，禁止重复报名（记录诊断）
+          if (candidate.conflict && applyState === 'joinable') applyState = 'applied';
+          if (applyState === 'joinable') scanRef.joinable += 1;
+          else if (applyState === 'applied') scanRef.applied += 1;
+          else scanRef.unknown += 1;
           // 官方已报名 / 列表已报名 → 记入 watch，保证后续 tick 继续跟踪
           if (applyState === 'applied') {
             state.watchedEk = state.watchedEk || {};
@@ -1465,45 +1687,81 @@
           var steps = Promise.resolve();
 
           // 活动类别（严格：ModuleCodeText 优先，其次官方 code 映射；不猜）
-          var categoryInfo = resolveCategory(config, info, candidate.item || {});
+          var categoryInfo = resolveCategory(config, info, candidate.item || {}, moduleOptions);
           var category = categoryInfo.category || '';
           if (!category) {
             results.push(row('ek', 'detail', id, 'skipped', 'category-unknown'));
           }
 
-          // a) 报名（积分策略闸门 → StuETime 窗口 → 每日上限 → 提交）
-          if (config.ek.apply && applyState === 'joinable') {
+          // a) 报名决策：所有候选都产出可见诊断行（不再静默消失）
+          var applyWindow = parseEkRange(info.StuETime);
+          var listStatus = ekActivityStatus(candidate.item || {});
+          if (!listStatus && candidate.status0) listStatus = '0';
+          function diagRow(status, reason, decision, extra) {
+            var base = {
+              activityName: String(info.ActivityName || ''),
+              category: category,
+              listStatus: listStatus,
+              classify: applyState,
+              decision: decision,
+              scoreGate: applyState === 'joinable' ? '' : '',
+              applyWindowStart: applyWindow.start,
+              applyWindowEnd: applyWindow.end,
+            };
+            if (extra) Object.keys(extra).forEach(function (k) { base[k] = extra[k]; });
+            return row('ek', 'apply', id, status, reason, base);
+          }
+          if (!config.ek.apply) {
+            results.push(diagRow('skipped', 'apply-disabled', 'skipped'));
+          } else if (applyState === 'applied') {
+            results.push(
+              diagRow(
+                'skipped',
+                candidate.conflict ? 'already-applied-conflict' : 'already-applied',
+                'already-applied',
+              ),
+            );
+          } else if (applyState !== 'joinable') {
+            results.push(diagRow('skipped', 'apply-state-unknown', 'unknown'));
+          } else {
             steps = steps.then(function () {
               if (stopped) return null;
               // 积分策略：无可信/账号匹配 snapshot、达标模块、未知类别 → 一律不新增
               if (!category) {
-                results.push(row('ek', 'apply', id, 'skipped', 'category-unknown'));
+                results.push(diagRow('skipped', 'category-unknown', 'category-unknown', { scoreGate: 'category-unknown' }));
                 return null;
               }
               var gate = scoreGateForCategory(config, category);
               if (!gate.allow) {
                 var blockedStatus = String(gate.reason || '').indexOf('score-') === 0 ? 'blocked' : 'skipped';
-                results.push(row('ek', 'apply', id, blockedStatus, gate.reason));
+                var decision = gate.reason === 'module-satisfied' ? 'module-satisfied' : 'score-blocked';
+                results.push(diagRow(blockedStatus, gate.reason, decision, { scoreGate: gate.reason }));
                 return null;
               }
-              var applyRange = parseEkRange(info.StuETime);
-              if (applyRange.start === null) {
-                results.push(row('ek', 'apply', id, 'waiting-material', 'missing-apply-window'));
+              // 严格时间窗（安全 gate，不得因 list status=0 放宽）：
+              // 缺报名时间字段 -> 明确 waiting-material，并输出诊断供核查字段结构
+              if (applyWindow.start === null) {
+                results.push(
+                  diagRow('waiting-material', 'missing-apply-window', 'unknown', {
+                    scoreGate: 'ok',
+                    detailHasStuETime: info.StuETime != null && String(info.StuETime).trim() !== '',
+                  }),
+                );
                 return null;
               }
               var nowMs = now();
-              if (nowMs < applyRange.start) {
-                results.push(row('ek', 'apply', id, 'not-yet', 'before-apply-window'));
+              if (nowMs < applyWindow.start) {
+                results.push(diagRow('not-yet', 'before-apply-window', 'window-waiting', { scoreGate: 'ok' }));
                 return null;
               }
-              if (applyRange.end !== null && nowMs > applyRange.end) {
-                results.push(row('ek', 'apply', id, 'expired', 'apply-window-passed'));
+              if (applyWindow.end !== null && nowMs > applyWindow.end) {
+                results.push(diagRow('expired', 'apply-window-passed', 'window-expired', { scoreGate: 'ok' }));
                 return null;
               }
               var limit = Math.max(0, Number(config.ek.dailyLimit) || 0);
               var countKey = dailyKey(today, account, 'ek', 'apply');
               if (limit > 0 && dailyCount(state, countKey) >= limit) {
-                results.push(row('ek', 'apply', id, 'skipped', 'daily-limit-reached'));
+                results.push(diagRow('skipped', 'daily-limit-reached', 'daily-limit', { scoreGate: 'ok' }));
                 return null;
               }
               var key = dedupeKey({ date: today, account: account, module: 'ek', activityId: id, action: 'apply' });
@@ -1517,9 +1775,15 @@
                   accountId: account,
                   activityName: String(info.ActivityName || ''),
                   category: category,
+                  listStatus: ekActivityStatus(candidate.item || {}) || '0',
+                  classify: 'joinable',
+                  decision: 'applicable',
+                  scoreGate: 'ok',
+                  applyWindowStart: applyWindow.start,
+                  applyWindowEnd: applyWindow.end,
                   config: config,
                   dailyKey: countKey,
-                  deadlineMs: applyRange.end,
+                  deadlineMs: applyWindow.end,
                   // 二次闸门：真正提交前再判一次（防止本轮内策略变化）
                   preSubmitGate: function () {
                     var again = scoreGateForCategory(config, category);
@@ -2024,6 +2288,8 @@
       previewMode = Boolean(preview);
       var config = getConfig();
       if (preview) config = mergeConfig(config, { dryRun: true });
+      // 每轮重置扫描汇总，避免 ek 关闭时仍展示上一轮统计
+      lastEkScan = null;
       var results = [];
       var state = null;
 
@@ -2084,7 +2350,13 @@
           });
           running = false;
           previewMode = false;
-          return { results: stamped, summary: summary, dryRun: Boolean(config.dryRun), at: now() };
+          return {
+            results: stamped,
+            summary: summary,
+            ekScan: lastEkScan ? JSON.parse(JSON.stringify(lastEkScan)) : null,
+            dryRun: Boolean(config.dryRun),
+            at: now(),
+          };
         });
     }
 

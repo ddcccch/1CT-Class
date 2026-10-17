@@ -22,6 +22,7 @@ config.local.json
 *.db
 /runtime/
 /logs/
+/docs/auto3ct-log-*.txt
 # Generated outputs
 __pycache__/
 *.py[cod]

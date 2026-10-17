@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>二课报名发现验收台（fake ctAPI，无 PII）</title>
+<link rel="stylesheet" href="/desktop/panel.css" />
+<style>
+  body { margin: 0; background: #0f1115; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #e5e7eb; }
+  #harness-hint { max-width: 980px; margin: 12px auto; padding: 8px 12px; border-radius: 6px; background: #23262e; border: 1px solid #3a3f4b; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div id="harness-hint">
+    二课报名发现验收：fake ctAPI（不联网、无真实凭证）。场景 = 用户真实日志复现：未过滤列表前 3 页只有「已报名(Status=1)」，
+    可报名候选只在 **status=0 显式分页**里；其中 1 个列表带 `ApplyInfo:{}`、详情 id 为空/全零模板但仍应可报名；
+    另有 status1 已报名活动签到窗口已开（验证列表失败时 watch 仍完成签到）。所有数据均为假。
+  </div>
+  <div id="auto3ct-panel-host"></div>
+  <script src="/desktop/vendor/jsQR.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    var pad2 = function (n) { return String(n).padStart(2, '0'); };
+    function bj(d) {
+      var x = new Date(d.getTime() + 8 * 3600 * 1000);
+      return x.getUTCFullYear() + '-' + pad2(x.getUTCMonth() + 1) + '-' + pad2(x.getUTCDate()) + ' ' +
+        pad2(x.getUTCHours()) + ':' + pad2(x.getUTCMinutes()) + ':' + pad2(x.getUTCSeconds());
+    }
+    var NOW = Date.now();
+    var FUTURE_START = bj(new Date(NOW + 2 * 3600 * 1000));
+    var FUTURE_END = bj(new Date(NOW + 3 * 3600 * 1000));
+    var OPEN_START = bj(new Date(NOW - 5 * 60 * 1000));
+    var OPEN_END = bj(new Date(NOW + 10 * 60 * 1000));
+    // 报名时间窗口（真实字段 StuETime；活动时间/签到时间不能当报名窗口）
+    var APPLY_START = bj(new Date(NOW - 60 * 60 * 1000));
+    var APPLY_END = bj(new Date(NOW + 60 * 60 * 1000));
+
+    // 假账号（无 PII）
+    var FAKE_ACCOUNT = { id: 'acc-fake-1', phone: '13800000000', password: 'fake-pw', remark: '测试账号', updatedAt: 1 };
+    var FAKE_EK_SESSION = {
+      JSESSIONID: 'fake-jsessionid', access_token: 'fake-access-token', refresh_token: 'fake-refresh-token',
+      user_info: { loginName: '20230001', studentId: '20230001', userName: '测试用户' },
+    };
+
+    var APPLIED = [
+      { Id: 'applied-1', ActivityId: 'applied-1', ActivityName: '已报名活动1', ActivityStatus: '1' },
+      { Id: 'applied-2', ActivityId: 'applied-2', ActivityName: '已报名活动2', ActivityStatus: '1' },
+      { Id: 'applied-3', ActivityId: 'applied-3', ActivityName: '已报名活动3', ActivityStatus: '1' },
+      { Id: 'applied-watch', ActivityId: 'applied-watch', ActivityName: '已报名待签到活动', ActivityStatus: '1' },
+    ];
+    // 可报名候选：A 正常（报名窗已开，签到未到）；B 列表 ApplyInfo:{} + 详情空 id/全零模板（仍应可报名）；
+    // C Status0 但缺 StuETime → 必须 missing-apply-window 且不提交；D 报名窗未来 → not-yet 但发现保留
+    var JOINABLE = [
+      { Id: 'joinable-A', ActivityId: 'joinable-A', ActivityName: '可报名活动A（签到未到时间）', ActivityStatus: '0', ModuleCode: 'M-THINK' },
+      { Id: 'joinable-B', ActivityId: 'joinable-B', ActivityName: '可报名活动B（模板误判回归）', ActivityStatus: '0', ApplyInfo: {}, ModuleCode: 'M-THINK' },
+      { Id: 'missing-window', ActivityId: 'missing-window', ActivityName: '可报名活动C（缺报名窗口）', ActivityStatus: '0', ModuleCode: 'M-THINK' },
+      { Id: 'future-window', ActivityId: 'future-window', ActivityName: '可报名活动D（报名未开始）', ActivityStatus: '0', ModuleCode: 'M-THINK' },
+    ];
+
+    var calls = [];
+    var writes = /^(ek\.(applyActivity|signByQr|signInOutByOthers)|club\.(joinActivity|signInOrSignBack)|unirun\.(autoRun))$/;
+    function record(group, name, payload) {
+      var entry = { name: group + '.' + name, payload: payload, write: writes.test(group + '.' + name) };
+      calls.push(entry);
+      return entry;
+    }
+
+    var table = {
+      ek: {
+        // 关键：支持 activityStatus 显式过滤 + pageIndex 分页；未过滤前 3 页只有已报名
+        // 官方 ModuleCodeList 随列表响应下发（engine per-run 捕获；也兼容详情携带）
+        getActivitiesList: function (payload) {
+          record('ek', 'getActivitiesList', payload);
+          var status = payload && payload.activityStatus != null ? String(payload.activityStatus) : '';
+          var page = Number(payload && payload.pageIndex) || 1;
+          var items = [];
+          if (status === '0') {
+            if (page === 1) items = [];
+            else if (page === 2) items = JOINABLE.slice();
+            else items = [];
+          } else if (status === '1') {
+            items = page === 1 ? APPLIED.slice() : [];
+          } else {
+            // 未过滤：只有已报名（复现用户日志“前3页只有已报”）
+            if (page === 1) items = APPLIED.slice(0, 3);
+            else if (page === 2) items = APPLIED.slice(3);
+            else items = [];
+          }
+          var res = { List: { Items: items, PageIndex: page, TotalPages: 3 } };
+          // 官方模块选项（真实字段 label/Label + value/Value；不是 Text）
+          res.ModuleCodeList = [
+            { label: '思想政治与道德修养', Label: '思想政治与道德修养', value: 'M-THINK', Value: 'M-THINK' },
+          ];
+          return res;
+        },
+        getActivityDetail: function (payload) {
+          record('ek', 'getActivityDetail', payload);
+          var id = String(payload && payload.id || '');
+          var common = { IsNeedSignInText: '是', IsNeedSignOutText: '是', ActivityListInfo: { ActivitySignInfo: { SignD: '未签到', SignT: '未签退' } } };
+          if (id === 'joinable-A') {
+            // A：报名窗已开（StuETime=现在±1h）+ 签到窗未来 → apply 应执行、sign 不提交
+            return {
+              ActivityInfo: Object.assign({
+                Id: id, ActivityName: '可报名活动A（签到未到时间）', ModuleCodeText: '思想政治与道德修养', SignWay: '1',
+                StuETime: APPLY_START + ' 至 ' + APPLY_END,
+                ActivityQDDate: FUTURE_START + ' 至 ' + FUTURE_END,
+                ActivityQTDate: FUTURE_START + ' 至 ' + FUTURE_END,
+              }, common),
+              ApplyInfo: null,
+            };
+          }
+          if (id === 'joinable-B') {
+            // B：报名窗已开；列表 ApplyInfo:{} + 详情全零模板 → 仍必须可报名；类别仅靠 ModuleCodeList 映射
+            return {
+              ActivityInfo: Object.assign({
+                Id: '', ActivityName: '可报名活动B（模板误判回归）', ModuleCodeText: '', SignWay: '1',
+                StuETime: APPLY_START + ' 至 ' + APPLY_END,
+                ActivityQDDate: FUTURE_START + ' 至 ' + FUTURE_END,
+                ActivityQTDate: FUTURE_START + ' 至 ' + FUTURE_END,
+              }, common),
+              ApplyInfo: { Id: '00000000-0000-0000-0000-000000000000', ActivityId: '', StudentId: '20230001', IsEdit: '' },
+              ModuleCodeList: [{ label: '思想政治与道德修养', Label: '思想政治与道德修养', value: 'M-THINK', Value: 'M-THINK' }],
+            };
+          }
+          if (id === 'missing-window') {
+            // C（strict）：Status0 但缺真实报名窗（无 StuETime）→ 必须 missing-apply-window，fakeApply 0
+            return {
+              ActivityInfo: Object.assign({ Id: id, ActivityName: '可报名活动C（缺报名窗口）', ModuleCodeText: '思想政治与道德修养', SignWay: '1', ActivityQDDate: FUTURE_START + ' 至 ' + FUTURE_END, ActivityQTDate: FUTURE_START + ' 至 ' + FUTURE_END }, common),
+              ApplyInfo: null,
+            };
+          }
+          if (id === 'future-window') {
+            // D：报名窗在未来 → 发现保留但 not-yet（不提交 apply；不影响后续 tick 再次评估）
+            return {
+              ActivityInfo: Object.assign({ Id: id, ActivityName: '可报名活动D（报名未开始）', ModuleCodeText: '思想政治与道德修养', SignWay: '1', StuETime: FUTURE_START + ' 至 ' + FUTURE_END, ActivityQDDate: FUTURE_START + ' 至 ' + FUTURE_END, ActivityQTDate: FUTURE_START + ' 至 ' + FUTURE_END }, common),
+              ApplyInfo: null,
+            };
+          }
+          if (id === 'applied-watch') {
+            return {
+              ActivityInfo: Object.assign({ Id: id, ActivityName: '已报名待签到活动', ModuleCodeText: '思想政治与道德修养', SignWay: '1', ActivityQDDate: OPEN_START + ' 至 ' + OPEN_END, ActivityQTDate: OPEN_START + ' 至 ' + OPEN_END }, common),
+              ApplyInfo: { Id: 'sign-watch-1', ActivityId: id },
+            };
+          }
+          // 其它已报名活动：签到窗口未来
+          return { ActivityInfo: Object.assign({ Id: id, ActivityName: '已报名活动', ModuleCodeText: '思想政治与道德修养', SignWay: '1', ActivityQDDate: FUTURE_START + ' 至 ' + FUTURE_END, ActivityQTDate: FUTURE_START + ' 至 ' + FUTURE_END }, common), ApplyInfo: { Id: 'sign-' + id, ActivityId: id } };
+        },
+        activityBoundImages: function (payload) { record('ek', 'activityBoundImages', payload); return { items: [{ id: 'img-1', file_url: 'fake://qr-1', created_at: OPEN_START }] }; },
+        applyActivity: function (payload) { record('ek', 'applyActivity', payload); return { errcode: 0 }; },
+        signByQr: function (payload) { record('ek', 'signByQr', payload); return { errcode: 0 }; },
+        getStudentScores: function (payload) { record('ek', 'getStudentScores', payload); return { Info: { StudentId: '20230001' }, TypeList: [] }; },
+      },
+      club: {
+        myActivityList: function () { return { code: 10000, response: { list: [] } }; },
+        activityList: function () { return { code: 10000, response: { list: [] } }; },
+        currentSignTask: function () { return { code: 10000, response: null }; },
+      },
+      unirun: { campusLocalList: function () { return [{ id: 'campus-1', label: '测试校区', mapName: 'm', schoolSiteIndex: 0 }]; } },
+    };
+    var ctAPI = {};
+    Object.keys(table).forEach(function (g) {
+      ctAPI[g] = {};
+      Object.keys(table[g]).forEach(function (n) {
+        ctAPI[g][n] = function (payload) { return Promise.resolve(table[g][n](payload)); };
+      });
+    });
+    ctAPI.__fake = {
+      calls: calls,
+      writeCount: function () { return calls.filter(function (c) { return c.write; }).length; },
+      applyCalls: function () { return calls.filter(function (c) { return c.name === 'ek.applyActivity'; }); },
+      signCalls: function () { return calls.filter(function (c) { return c.name === 'ek.signByQr'; }); },
+      listCalls: function () { return calls.filter(function (c) { return c.name === 'ek.getActivitiesList'; }); },
+      reset: function () { calls.length = 0; },
+    };
+    window.ctAPI = ctAPI;
+
+    if (!window.localStorage.getItem('ct_unirun_accounts_v1')) {
+      window.localStorage.setItem('ct_unirun_accounts_v1', JSON.stringify({ selectedId: FAKE_ACCOUNT.id, items: [FAKE_ACCOUNT] }));
+    }
+    if (!window.localStorage.getItem('ct_ek_session_v1')) {
+      window.localStorage.setItem('ct_ek_session_v1', JSON.stringify(FAKE_EK_SESSION));
+    }
+    if (!window.localStorage.getItem('auto3ct:config')) {
+      window.localStorage.setItem('auto3ct:config', JSON.stringify({
+        dryRun: true,
+        accountId: FAKE_ACCOUNT.id,
+        campusId: 'campus-1',
+        ek: {
+          enabled: true, keywords: [], allowAll: true, apply: true,
+          signIn: true, signOut: true, dailyLimit: 10,
+          qrDelayMinutes: 0, qrRetryMinutes: 0, qrMaxAttempts: 5,
+          scorePolicy: { enabled: false },
+        },
+        unirun: { enabled: false },
+        club: { enabled: false },
+      }));
+    }
+    window.__SMOKE_READY__ = false;
+  })();
+  </script>
+
+  <script src="/desktop/score-policy.js"></script>
+  <script src="/desktop/result-store.js"></script>
+  <script src="/desktop/automation.js"></script>
+  <script src="/desktop/dashboard.js"></script>
+  <script src="/desktop/panel.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    function attach() {
+      try {
+        if (!window.Auto3CTAutomation || !window.Auto3CTResults) return false;
+        var storage = {
+          get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
+          set: function (k, v) { window.localStorage.setItem(k, v); },
+          remove: function (k) { window.localStorage.removeItem(k); },
+        };
+        var store = window.Auto3CTResults.createStore({ storage: storage });
+        var logs = [];
+        var emitted = [];
+        var engine = window.Auto3CTAutomation.createEngine({
+          api: window.ctAPI,
+          storage: storage,
+          decodeQr: function () { return Promise.resolve('lbUUh-fake-enroll-qr'); },
+          logger: { log: function (m) { logs.push(String(m)); } },
+          onResult: function (ev) { emitted.push(ev); return store.append(ev); },
+        });
+        window.__SMOKE_CTX__ = { engine: engine, store: store, logs: logs, emitted: emitted };
+        return true;
+      } catch (err) {
+        window.__SMOKE_CTX_ERROR__ = String(err && err.stack ? err.stack : err);
+        return false;
+      }
+    }
+    function done() { window.__SMOKE_READY__ = true; }
+    if (attach()) done();
+    else {
+      var t = 0;
+      var timer = setInterval(function () { t += 1; if (attach() || t > 120) { clearInterval(timer); done(); } }, 50);
+    }
+  })();
+  </script>
+</body>
+</html>
