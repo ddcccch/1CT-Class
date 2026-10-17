@@ -31,6 +31,13 @@
 - **新增防护**：启动器采用 ASCII + CRLF，并通过路径级 `.gitattributes` 固定行尾；在 `setlocal` 内清理影响 Electron 的 Node 环境变量，仅对子进程生效。行为测试必须真实执行 CMD，检查 stdout/stderr 与退出码；最终桌面验证也从同一启动器进入，并保留污染环境，以临时资料隔离真实账号。
 - **验收准则**：验证“用户的入口”，不以直接 EXE 启动、假 API 面板或静态文本断言替代双击路径验证。
 
+## 无控制台桌面入口
+
+- 用户日常入口应与排错入口分离。CMD 可用于保留错误输出，但不是“像普通桌面程序一样打开”的理想入口。
+- 本次采用 .NET Framework C# `/target:winexe`，PE Subsystem=2；直接 `ProcessStartInfo` 调用 Electron 主程序，`UseShellExecute=false`、`CreateNoWindow=true`，仅对子进程清理 Node 模式环境。无需借 CMD、PowerShell 或脚本宿主隐藏窗口。
+- 使用临时目录中的同名假 EXE 探针测试参数、工作目录和子环境，不重启用户正在运行的程序。前台激活要优先具有非零主窗口句柄的进程，避免选中 Electron renderer/GPU 辅助进程。
+- 静态测试不能把安全属性 `UseShellExecute=false` 误判为危险的 ShellExecute 调用；应检查具体调用/属性值。
+
 ## 一句话总结
 
 先找源码与真实接口，再设计有限状态自动化；以真实夹具、持久化防重和独立副本验收来约束“看似成功”。
