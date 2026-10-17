@@ -9,6 +9,8 @@
 /desktop/vendor/
 /artifacts/patched-renderer/
 /artifacts/test-profile/
+/artifacts/launcher-profile-*/
+/artifacts/launcher-invoke-*.cmd
 # Local credentials and runtime state
 .env
 .env.*
