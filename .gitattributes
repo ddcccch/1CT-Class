@@ -1,0 +1,4 @@
+# Keep the Windows launchers CRLF regardless of core.autocrlf; cmd.exe mis-parses
+# LF-only batch files on GBK consoles (see docs/launcher-fix.md).
+start-3ct-auto.cmd text eol=crlf
+desktop/start-3ct-auto.cmd text eol=crlf

@@ -502,7 +502,7 @@ class StartupFilesTests(unittest.TestCase):
             REPO_ROOT / "desktop" / "start-3ct-auto.cmd",
         ):
             with self.subTest(path=path.name):
-                text = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="ascii")
                 self.assertIn("3CT-Auto.exe", text)
                 self.assertIn("3CT-Auto\\3CT-Auto.exe", text)
                 self.assertIn("tasklist", text)
@@ -511,7 +511,8 @@ class StartupFilesTests(unittest.TestCase):
                 self.assertIn("pause", text)
                 self.assertNotIn("taskkill", text.lower())
                 self.assertNotIn("Stop-Process", text)
-                self.assertIn("共享同一用户数据和单实例锁", text)
+                self.assertIn("single-instance lock", text)
+                self.assertIn("never kills or modifies the original 3CT", text)
 
     def test_build_writes_launcher_into_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
