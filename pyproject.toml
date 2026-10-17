@@ -1,0 +1,9 @@
+[project]
+name = "auto3ct"
+version = "0.1.0"
+description = "Local daily workflow scheduler for 3CT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+auto3ct = "auto3ct.cli:main"

@@ -1,0 +1,25 @@
+# Original application and personal files
+/3CT/
+/二课积分管理表/
+/reverse/extracted/
+/reverse/sources/
+/reverse/asar-list.txt
+/rea-analysis.json
+/3CT-Auto/
+/desktop/vendor/
+# Local credentials and runtime state
+.env
+.env.*
+!.env.example
+config.local.json
+*.sqlite
+*.sqlite3
+*.db
+/runtime/
+/logs/
+# Generated outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
