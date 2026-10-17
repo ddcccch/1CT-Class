@@ -1,0 +1,474 @@
+/* 3CT AutoPanel 样式：暗色、低干扰、可折叠、可读优先 */
+
+.auto3ct-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 12px;
+  color: #e6e8ec;
+  background: rgba(22, 24, 30, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  overflow: hidden;
+}
+
+.auto3ct-panel.collapsed .a3-main {
+  display: none;
+}
+
+.auto3ct-panel.collapsed {
+  width: 168px;
+}
+
+/* ---------- 头部 ---------- */
+
+.a3-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: default;
+}
+
+.a3-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.2px;
+  color: #cfd3dc;
+}
+
+.a3-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.7);
+}
+
+.a3-head-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.a3-icon-btn {
+  border: 0;
+  background: transparent;
+  color: #9aa1ad;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.a3-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e6e8ec;
+}
+
+/* ---------- 主体 ---------- */
+
+.a3-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.a3-toggle-block {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.a3-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.a3-row-main {
+  min-width: 0;
+}
+
+.a3-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f2f4f8;
+}
+
+.a3-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8d94a1;
+}
+
+.a3-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.a3-inline-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- 开关/复选 ---------- */
+
+.a3-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #9aa1ad;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.a3-check input[type='checkbox'] {
+  accent-color: #4f8cff;
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+}
+
+.a3-toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: background 0.18s ease;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.a3-toggle .a3-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #d5d9e0;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.a3-toggle.on {
+  background: rgba(74, 222, 128, 0.28);
+  border-color: rgba(74, 222, 128, 0.55);
+}
+
+.a3-toggle.on .a3-toggle-knob {
+  transform: translateX(20px);
+  background: #4ade80;
+}
+
+/* ---------- 摘要 / 前置条件提示 ---------- */
+
+.a3-summary {
+  padding: 0 12px 8px;
+  font-size: 11px;
+  color: #8d94a1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.a3-prereq {
+  padding: 6px 0 0;
+  color: #8d94a1;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* ---------- Tabs ---------- */
+
+.a3-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.a3-tab {
+  border: 0;
+  background: transparent;
+  color: #8d94a1;
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+}
+
+.a3-tab:hover {
+  color: #cfd3dc;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.a3-tab.active {
+  color: #f2f4f8;
+  background: rgba(79, 140, 255, 0.16);
+  box-shadow: inset 0 -2px 0 #4f8cff;
+}
+
+/* ---------- Tab 内容 ---------- */
+
+.a3-body {
+  overflow-y: auto;
+  max-height: min(62vh, 560px);
+  padding: 10px 12px 12px;
+}
+
+.a3-tab-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.a3-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.a3-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.a3-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #a9b1bf;
+  letter-spacing: 0.3px;
+}
+
+/* 字段：label 至少 130px，控件自适应，hint 独占一行 */
+.a3-field {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.a3-field-label {
+  flex: 0 0 130px;
+  min-width: 130px;
+  color: #c3c9d3;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.a3-field-hint {
+  flex: 1 1 100%;
+  color: #767d8a;
+  font-size: 10px;
+  line-height: 1.5;
+  padding-left: 140px;
+}
+
+.a3-field-wrap .a3-input {
+  flex: 1 1 180px;
+  width: auto;
+}
+
+.a3-input {
+  flex: 0 0 180px;
+  width: 180px;
+  min-width: 0;
+  padding: 4px 7px;
+  font-size: 11px;
+  color: #e6e8ec;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.a3-select {
+  flex: 1 1 220px;
+  width: auto;
+  text-overflow: ellipsis;
+}
+
+.a3-input:focus {
+  border-color: rgba(79, 140, 255, 0.65);
+  box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.16);
+}
+
+.a3-hint {
+  font-size: 10px;
+  color: #767d8a;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.a3-pre {
+  margin: 0;
+  padding: 7px 8px;
+  max-height: 140px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #b9c0cc;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---------- 按钮 ---------- */
+
+.a3-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #d6dae2;
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.a3-btn:hover {
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.a3-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.a3-btn.danger {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.a3-btn.danger:hover {
+  background: rgba(248, 113, 113, 0.18);
+}
+
+/* ---------- 日志 ---------- */
+
+.a3-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: min(46vh, 420px);
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.a3-log {
+  display: flex;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.a3-log-time {
+  flex: 0 0 auto;
+  color: #6f7683;
+}
+
+.a3-log-text {
+  flex: 1 1 auto;
+  word-break: break-word;
+  color: #b9c0cc;
+}
+
+.a3-log-success .a3-log-text {
+  color: #86efac;
+}
+
+.a3-log-error .a3-log-text {
+  color: #fca5a5;
+}
+
+.a3-log-warn .a3-log-text {
+  color: #fcd34d;
+}
+
+/* ---------- 滚动条 ---------- */
+
+.a3-body::-webkit-scrollbar,
+.a3-log-list::-webkit-scrollbar,
+.a3-pre::-webkit-scrollbar {
+  width: 8px;
+}
+
+.a3-body::-webkit-scrollbar-thumb,
+.a3-log-list::-webkit-scrollbar-thumb,
+.a3-pre::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+}
+
+.a3-body::-webkit-scrollbar-track,
+.a3-log-list::-webkit-scrollbar-track,
+.a3-pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 窄屏 ---------- */
+
+@media (max-width: 600px) {
+  .auto3ct-panel {
+    right: 8px;
+    bottom: 8px;
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+  }
+
+  .a3-field-label {
+    flex-basis: 100%;
+    min-width: 100%;
+  }
+
+  .a3-field-hint {
+    padding-left: 0;
+  }
+
+  .a3-input {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+}
