@@ -110,6 +110,19 @@ function makeEngine(opts = {}) {
   ['ek', 'club', 'unirun'].forEach((name) => {
     if (config[name] && config[name].enabled === undefined) config[name].enabled = true;
   });
+  // 二课积分策略：本文件用例聚焦既有引擎行为，显式关闭策略（生产默认 true）。
+  // 策略默认启用下的行为由 desktop/test-automation-score.cjs 专项覆盖。
+  if (config.ek && config.ek.scorePolicy === undefined) {
+    config.ek.scorePolicy = { enabled: false };
+  }
+  if (config.ek && Array.isArray(config.ek.scorePolicy.moduleOptions) === false) {
+    config.ek.scorePolicy = Object.assign({}, config.ek.scorePolicy, {
+      moduleOptions: [
+        { label: '思想政治与道德修养', value: 'M1' },
+        { label: '传统文化与人文素养', value: 'M2' },
+      ],
+    });
+  }
   const engine = A.createEngine({
     api,
     storage,
@@ -297,6 +310,7 @@ function ekDetail(over = {}, infoOver = {}, applyInfo = { Id: 'sign-1', Activity
     ActivityInfo: {
       Id: 'act-1',
       ActivityName: '校园歌手大赛',
+      ModuleCodeText: '思想政治与道德修养', // 真实字段：exact 模块中文名
       SignWay: 1, // 1=扫码
       SignWayText: '扫码',
       StuETime: '2026-09-20 09:00:00 至 2026-09-25 18:00:00',

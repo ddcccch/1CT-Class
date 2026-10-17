@@ -27,8 +27,30 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
+  /**
+   * 积分策略模块依赖：
+   *  - 浏览器：先加载 score-policy.js（window.Auto3CTScorePolicy）
+   *  - Node：require('./score-policy.js')
+   * 缺失时引擎不崩溃：策略视为不可信（只阻断新增报名，不影响已报名签到签退）。
+   */
+  var ScorePolicy = (function () {
+    try {
+      if (typeof require === 'function') {
+        var m = require('./score-policy.js');
+        if (m && m.MODULES) return m;
+      }
+    } catch (e) {
+      /* 浏览器环境无 require */
+    }
+    var g = typeof globalThis !== 'undefined' ? globalThis : null;
+    if (g && g.Auto3CTScorePolicy) return g.Auto3CTScorePolicy;
+    return null;
+  })();
+
   var STATE_KEY = 'auto3ct:state';
   var CONFIG_KEY = 'auto3ct:config';
+  /** 积分进度独立存储（按账号隔离）：{version:1, accounts:{[accountId]:{snapshot,refreshedAt,lastRefreshError}}} */
+  var SCORES_KEY = 'auto3ct:scores';
 
   var EK_KEY = 'ct_ek_session_v1';
   /** 校园跑/俱乐部账号真实键（renderer/services/unirunAccounts.ts） */
@@ -73,6 +95,20 @@
       qrRetryMinutes: 2,
       /** 每阶段每天最多拉几次图库（总上限） */
       qrMaxAttempts: 3,
+      /**
+       * 积分缺口策略（默认启用）：
+       *  - 未导入/未刷新出可信 snapshot 前，阻断「新增报名」（已报名 watch 仍继续签到签退）
+       *  - 模块达标后不再新增该模块报名
+       *  - 未知类别 fail-closed
+       */
+      scorePolicy: {
+        enabled: true,
+        snapshot: null,
+        staleMs: 24 * 60 * 60 * 1000,
+        refreshIntervalMs: 60 * 60 * 1000,
+        refreshOnStart: true,
+        moduleOptions: [],
+      },
     },
   };
 
@@ -579,6 +615,154 @@
       return acc ? String(acc.id) : 'local';
     }
 
+    // ── 积分缺口策略（二课） ────────────────────────────────
+
+    /** 读积分存储：{version:1, accounts:{[accountId]:{snapshot, refreshedAt, lastRefreshError}}} */
+    function loadScores() {
+      var raw = null;
+      try {
+        raw = readJson(SCORES_KEY);
+      } catch (e) {
+        // 损坏不阻断签到签退，但不得用于放行新增报名
+        return { version: 1, accounts: {}, corrupt: true };
+      }
+      if (!raw || typeof raw !== 'object' || !raw.accounts || typeof raw.accounts !== 'object') {
+        return { version: 1, accounts: {} };
+      }
+      return { version: 1, accounts: raw.accounts };
+    }
+
+    function saveScores(scores) {
+      if (previewMode) return;
+      writeJson(SCORES_KEY, { version: 1, accounts: scores.accounts || {} });
+    }
+
+    function currentEkAccount() {
+      var ek = ekSession();
+      var loginName = ek && ek.user_info && ek.user_info.loginName;
+      return loginName ? String(loginName) : '';
+    }
+
+    /** 取当前账号的 snapshot 记录 */
+    function scoreEntry(scores, accountId) {
+      if (!accountId) return null;
+      var entry = scores.accounts[accountId];
+      if (!entry || typeof entry !== 'object') return null;
+      return entry;
+    }
+
+    /**
+     * 当前生效 snapshot：只认 store（按账号隔离）。
+     * config.ek.scorePolicy.snapshot 仅作为「store 尚无记录时的一次性 seed」，
+     * 一旦 store 有记录（手动导入/官方刷新），一切以 store 为准，避免旧注入挡住最新数据。
+     */
+    function effectiveSnapshot(config) {
+      var account = currentEkAccount();
+      var scores = loadScores();
+      var entry = scoreEntry(scores, account);
+      if (entry && entry.snapshot) return entry.snapshot;
+      var seed = config.ek && config.ek.scorePolicy && config.ek.scorePolicy.snapshot;
+      return seed || null;
+    }
+
+    /**
+     * 计算当前策略（含 stale/accountMatch 元数据）。
+     * 依赖缺失或异常时返回安全的 unavailable 元数据，绝不 throw（暴露给 UI 的状态接口必须安全）。
+     */
+    function buildPolicy(config) {
+      var cfg = (config.ek && config.ek.scorePolicy) || DEFAULTS.ek.scorePolicy;
+      var account = currentEkAccount();
+      var snapshot = null;
+      try {
+        snapshot = effectiveSnapshot(config);
+      } catch (e) {
+        snapshot = null;
+      }
+      if (!ScorePolicy) {
+        return {
+          enabled: cfg.enabled !== false,
+          trusted: false,
+          accountMatch: false,
+          stale: true,
+          reason: 'score-policy-unavailable',
+          accountId: account,
+          source: 'unknown',
+          refreshedAt: null,
+          totalGap: null,
+          gaps: [],
+          satisfiedModules: [],
+        };
+      }
+      var policy;
+      try {
+        policy = ScorePolicy.evaluatePolicy({
+          snapshot: snapshot,
+          accountId: account,
+          now: now(),
+          staleMs: cfg.staleMs,
+          enabled: cfg.enabled !== false,
+        });
+      } catch (e) {
+        return {
+          enabled: cfg.enabled !== false,
+          trusted: false,
+          accountMatch: false,
+          stale: true,
+          reason: 'score-policy-error',
+          accountId: account,
+          source: 'unknown',
+          refreshedAt: null,
+          totalGap: null,
+          gaps: [],
+          satisfiedModules: [],
+        };
+      }
+      policy.accountId = account;
+      policy.refreshedAt = snapshot && Number(snapshot.updatedAt) ? Number(snapshot.updatedAt) : null;
+
+      /**
+       * 官方刷新失败（最近一次尝试失败）：即使旧 snapshot 的 updatedAt 仍在 24h 内，
+       * 也不得视为可信 —— 否则「刷新失败却继续放新报名」违背 fail-closed 口径。
+       * 手动重新导入 / 下一次成功刷新会清掉 lastRefreshError 自动恢复。
+       * 注意：只影响「新增报名」判定；已报名活动的 watch 签到/签退不受影响。
+       */
+      try {
+        var entry = scoreEntry(loadScores(), account) || {};
+        if (entry.lastRefreshError) {
+          policy.trusted = false;
+          policy.stale = true;
+          policy.reason = 'score-refresh-failed';
+        }
+      } catch (e) {
+        policy.trusted = false;
+        policy.stale = true;
+        policy.reason = 'score-refresh-failed';
+      }
+
+      return policy;
+    }
+
+    /** 活动类别解析：detail.ModuleCodeText 优先，其次 ModuleCode → 官方选项映射 */
+    function resolveCategory(config, detailInfo, listItem) {
+      if (!ScorePolicy) return { category: null, reason: 'policy-unavailable', via: null };
+      var cfg = (config.ek && config.ek.scorePolicy) || DEFAULTS.ek.scorePolicy;
+      var options = Array.isArray(cfg.moduleOptions) ? cfg.moduleOptions : [];
+      return ScorePolicy.resolveActivityCategory({
+        detailInfo: detailInfo,
+        listItem: listItem,
+        moduleOptions: options,
+      });
+    }
+
+    /** 针对某个模块类别的报名闸门 */
+    function scoreGateForCategory(config, category) {
+      if (!ScorePolicy) return { allow: false, reason: 'score-policy-unavailable' };
+      var cfg = (config.ek && config.ek.scorePolicy) || DEFAULTS.ek.scorePolicy;
+      if (cfg.enabled === false) return { allow: true, reason: 'policy-disabled' };
+      var policy = buildPolicy(config);
+      return ScorePolicy.canApplyCategory(policy, category);
+    }
+
     /** 校区来自 ctAPI.unirun.campusLocalList()（不是 localStorage） */
     function listCampuses() {
       return Promise.resolve()
@@ -671,6 +855,18 @@
       if (stopped) {
         return Promise.resolve(row(meta.module, meta.action, meta.activityId, 'skipped', 'stopped', { key: key }));
       }
+      // 二次策略闸门（仅真实提交前；preview 已在上面返回）
+      if (typeof meta.preSubmitGate === 'function') {
+        var gateReason = null;
+        try {
+          gateReason = meta.preSubmitGate();
+        } catch (e) {
+          gateReason = 'score-policy-error';
+        }
+        if (gateReason) {
+          return Promise.resolve(row(meta.module, meta.action, meta.activityId, 'blocked', gateReason, { key: key }));
+        }
+      }
 
       // fail-closed：inflight 必须先落盘成功
       state.inflight[key] = now();
@@ -734,6 +930,7 @@
           } else if (verdict !== 'success') {
             reason = 'upstream-rejected';
           }
+          emitResult(meta, status, reason);
           return row(meta.module, meta.action, meta.activityId, status, reason, { key: key });
         })
         .catch(function (e) {
@@ -745,8 +942,41 @@
             logger.log('[storage] unknown 状态落盘失败：' + sanitizeError(err));
           }
           logger.log('[' + meta.module + '] ' + meta.action + ' ' + String(meta.activityId) + ' → unknown');
-          return row(meta.module, meta.action, meta.activityId, 'unknown', sanitizeError(e), { key: key });
+          // 固定文案：不把原始异常拼进结果/历史（避免潜在敏感内容外泄）
+          emitResult(meta, 'unknown', 'submission-result-unknown');
+          return row(meta.module, meta.action, meta.activityId, 'unknown', 'submission-result-unknown', { key: key });
         });
+    }
+
+    /**
+     * 结果事件回调（供 result-store 做历史/看板）。
+     * 只在**真实提交定论**后触发：dry-run / skipped / blocked / waiting 都不触发。
+     * 行内绝不含 payload / token / 密码 / 完整手机号。
+     */
+    function emitResult(meta, status, reason) {
+      if (typeof opts.onResult !== 'function') return;
+      try {
+        var event = {
+          key: meta.key,
+          // 账号取 meta 快照（避免运行期间切换账号导致结果挂错账号）
+          accountId: String(meta.accountId || ''),
+          activityId: meta.activityId == null ? '' : String(meta.activityId),
+          activityName: String(meta.activityName || ''),
+          category: String(meta.category || ''),
+          module: meta.module,
+          action: meta.action,
+          status: status,
+          reason: reason || '',
+          at: now(),
+          dryRun: false,
+        };
+        if (meta.stage) event.stage = String(meta.stage);
+        if (typeof meta.distanceMeters === 'number') event.distanceMeters = meta.distanceMeters;
+        opts.onResult(event);
+      } catch (e) {
+        // 回调异常绝不影响业务结果
+        logger.log('[onResult] 回调失败');
+      }
     }
 
     // ── 校园跑 ──────────────────────────────────────────────
@@ -824,6 +1054,11 @@
             module: 'unirun',
             action: 'autoRun',
             activityId: 'daily',
+            accountId: accountFor(config, 'unirun'),
+            activityName: '校园跑',
+            category: '',
+            stage: 'run',
+            distanceMeters: runDistance,
             config: config,
             // 当天执行窗口结束前才允许真正提交
             deadlineMs: dayWindowEndMs(startMin, windowMin),
@@ -942,6 +1177,10 @@
                     module: 'club',
                     action: 'join',
                     activityId: id,
+                    accountId: account,
+                    activityName: String(item.activityName || ''),
+                    category: '',
+                    stage: 'join',
                     config: config,
                     dailyKey: countKey,
                   },
@@ -1003,7 +1242,7 @@
                         results.push(row('club', 'signIn', id, 'skipped', 'already-signed-in-upstream'));
                       } else {
                         inner.push(
-                          planClubSign(state, config, account, results, cred, id, 'signIn', '1', startMs, startMs + CLUB_SIGNIN_WINDOW_MIN * 60000, coord,
+                          planClubSign(state, config, account, results, cred, id, 'signIn', '1', startMs, startMs + CLUB_SIGNIN_WINDOW_MIN * 60000, coord, activityNameOf(taskItem, base),
                             function () {
                               return true; // 签到无前置依赖
                             }),
@@ -1025,6 +1264,7 @@
                               // 签退依赖：本地签到成功 或 官方已签到
                               return Boolean(state.done[inKey]) || officialIn;
                             },
+                            activityNameOf(taskItem, base),
                           ),
                         );
                       }
@@ -1042,7 +1282,17 @@
         });
     }
 
-    function planClubSign(state, config, account, results, cred, id, action, signType, windowStart, windowEnd, coord, canRun) {
+    /** 俱乐部活动名（任务/列表两个来源取先有值的） */
+    function activityNameOf() {
+      for (var i = 0; i < arguments.length; i += 1) {
+        var src = arguments[i];
+        var name = src && (src.activityName || src.ActivityName);
+        if (name) return String(name);
+      }
+      return '';
+    }
+
+    function planClubSign(state, config, account, results, cred, id, action, signType, windowStart, windowEnd, coord, canRun, activityName) {
       var t = now();
       if (t < windowStart) {
         results.push(row('club', action, id, 'not-yet', 'before-window'));
@@ -1071,6 +1321,10 @@
           module: 'club',
           action: action,
           activityId: id,
+          accountId: account,
+          activityName: String(activityName || ''),
+          category: '',
+          stage: action === 'signIn' ? 'sign-in' : 'sign-out',
           config: config,
           // 真正提交前的截止校验：过了签到/签退窗口就不再提交
           deadlineMs: windowEnd,
@@ -1210,10 +1464,28 @@
           }
           var steps = Promise.resolve();
 
-          // a) 报名（必须已报名窗口 StuETime 内；窗口缺失/不在窗等待，不提交）
+          // 活动类别（严格：ModuleCodeText 优先，其次官方 code 映射；不猜）
+          var categoryInfo = resolveCategory(config, info, candidate.item || {});
+          var category = categoryInfo.category || '';
+          if (!category) {
+            results.push(row('ek', 'detail', id, 'skipped', 'category-unknown'));
+          }
+
+          // a) 报名（积分策略闸门 → StuETime 窗口 → 每日上限 → 提交）
           if (config.ek.apply && applyState === 'joinable') {
             steps = steps.then(function () {
               if (stopped) return null;
+              // 积分策略：无可信/账号匹配 snapshot、达标模块、未知类别 → 一律不新增
+              if (!category) {
+                results.push(row('ek', 'apply', id, 'skipped', 'category-unknown'));
+                return null;
+              }
+              var gate = scoreGateForCategory(config, category);
+              if (!gate.allow) {
+                var blockedStatus = String(gate.reason || '').indexOf('score-') === 0 ? 'blocked' : 'skipped';
+                results.push(row('ek', 'apply', id, blockedStatus, gate.reason));
+                return null;
+              }
               var applyRange = parseEkRange(info.StuETime);
               if (applyRange.start === null) {
                 results.push(row('ek', 'apply', id, 'waiting-material', 'missing-apply-window'));
@@ -1242,9 +1514,17 @@
                   module: 'ek',
                   action: 'apply',
                   activityId: id,
+                  accountId: account,
+                  activityName: String(info.ActivityName || ''),
+                  category: category,
                   config: config,
                   dailyKey: countKey,
                   deadlineMs: applyRange.end,
+                  // 二次闸门：真正提交前再判一次（防止本轮内策略变化）
+                  preSubmitGate: function () {
+                    var again = scoreGateForCategory(config, category);
+                    return again.allow ? null : again.reason;
+                  },
                 },
                 function () {
                   return api.ek.applyActivity({ requestsData: session, act_id: id });
@@ -1282,6 +1562,8 @@
                 action: 'signIn',
                 funType: 'QD',
                 signWay: signWay,
+                activityName: String(info.ActivityName || ''),
+                category: category,
                 range: parseEkRange(info.ActivityQDDate),
                 doneText: signInDoneText,
                 signInDoneText: signInDoneText,
@@ -1292,6 +1574,8 @@
                 action: 'signOut',
                 funType: 'QT',
                 signWay: signWay,
+                activityName: String(info.ActivityName || ''),
+                category: category,
                 range: parseEkRange(info.ActivityQTDate),
                 doneText: signOutDoneText,
                 // 签退依赖：官方 SignD，或本地签到 done；活动本身不需要签到则放行
@@ -1479,6 +1763,10 @@
               module: 'ek',
               action: task.action,
               activityId: id,
+              accountId: account,
+              activityName: String(task.activityName || ''),
+              category: String(task.category || ''),
+              stage: task.action === 'signIn' ? 'sign-in' : 'sign-out',
               config: config,
               // 真正提交前的截止校验：过了官方窗口结束就不再提交
               deadlineMs: range.end,
@@ -1623,6 +1911,101 @@
       });
     }
 
+    // ── 官方成绩刷新（内部实现，供 run 自动调用与手动 refresh 共用） ──
+
+    /**
+     * 刷新官方成绩。
+     *  - 按 lastAttemptAt 做 1h 节流（失败也记时间，避免每 tick 打接口）
+     *  - 成功后写 store（写前 re-read 最新 accounts，避免并发覆盖其他账号/手动导入）
+     *  - 失败保留旧 snapshot，仅更新 lastRefreshError / lastAttemptAt
+     *  - preview 模式不落盘
+     */
+    function refreshScoresCore(options) {
+      if (!ScorePolicy) return Promise.resolve({ ok: false, reason: 'score-policy-unavailable' });
+      var config = getConfig();
+      var cfg = (config.ek && config.ek.scorePolicy) || DEFAULTS.ek.scorePolicy;
+      var account = currentEkAccount();
+      if (!account) return Promise.resolve({ ok: false, reason: 'ek-not-logged-in' });
+      var session = ekSession();
+      if (!session) return Promise.resolve({ ok: false, reason: 'ek-not-logged-in' });
+      if (!api.ek || typeof api.ek.getStudentScores !== 'function') {
+        return Promise.resolve({ ok: false, reason: 'api-unavailable' });
+      }
+
+      var force = Boolean(options && options.force);
+      var entry = scoreEntry(loadScores(), account) || {};
+      var lastAttempt = Number(entry.lastAttemptAt) || Number(entry.refreshedAt) || 0;
+      var interval = Math.max(0, Number(cfg.refreshIntervalMs) || DEFAULTS.ek.scorePolicy.refreshIntervalMs);
+      if (!force && lastAttempt > 0 && now() - lastAttempt < interval) {
+        return Promise.resolve({ ok: false, reason: 'refresh-throttled', refreshedAt: entry.refreshedAt || 0 });
+      }
+
+      var attemptAt = now();
+
+      /**
+       * 写 store 的唯一入口：re-read 最新 accounts 再合并本账号条目，
+       * 防止异步刷新期间其他账号/手动导入被覆盖。
+       */
+      function persistEntry(patch) {
+        var latest = loadScores();
+        var prev = scoreEntry(latest, account) || {};
+        latest.accounts[account] = {
+          snapshot: patch.snapshot !== undefined ? patch.snapshot : prev.snapshot || null,
+          refreshedAt: patch.refreshedAt !== undefined ? patch.refreshedAt : prev.refreshedAt || 0,
+          lastAttemptAt: attemptAt,
+          lastRefreshError: patch.lastRefreshError === undefined ? prev.lastRefreshError || null : patch.lastRefreshError,
+        };
+        saveScores(latest);
+      }
+
+      return Promise.resolve(api.ek.getStudentScores({ requestsData: session }))
+        .then(function (resp) {
+          var parsed = ScorePolicy.parseOfficialScores(resp);
+          if (!parsed.ok) {
+            persistEntry({ lastRefreshError: 'official-' + String(parsed.reason || 'untrusted') });
+            return { ok: false, reason: 'official-untrusted', detail: parsed.reason };
+          }
+          var oldSnapshot = (scoreEntry(loadScores(), account) || {}).snapshot || null;
+          var merged;
+          try {
+            merged = ScorePolicy.mergeOfficialSnapshot(oldSnapshot, parsed, account, now());
+          } catch (e) {
+            var reason = String(e && e.message ? e.message : e);
+            var fixed = reason.indexOf('account-mismatch') >= 0 ? 'official-account-mismatch' : 'official-merge-failed';
+            persistEntry({ lastRefreshError: fixed });
+            return { ok: false, reason: fixed, stale: Boolean(oldSnapshot) };
+          }
+          persistEntry({ snapshot: merged, refreshedAt: now(), lastRefreshError: null });
+          var policy = buildPolicy(getConfig());
+          return {
+            ok: true,
+            snapshot: JSON.parse(JSON.stringify(merged)),
+            stale: Boolean(policy.stale),
+            unknown: parsed.unknown || [],
+          };
+        })
+        .catch(function (e) {
+          persistEntry({ lastRefreshError: 'official-request-failed' });
+          logger.log('[score] 官方成绩刷新失败');
+          return { ok: false, reason: 'official-request-failed' };
+        });
+    }
+
+    /**
+     * run 入口的自动刷新：仅当策略启用 + refreshOnStart 时按 1h 缓存尝试一次。
+     * preview 也允许读（不落盘、不消耗真实预算）；失败静默（旧 snapshot 保留）。
+     */
+    function maybeAutoRefresh(config) {
+      var cfg = (config.ek && config.ek.scorePolicy) || DEFAULTS.ek.scorePolicy;
+      if (cfg.enabled === false) return Promise.resolve(null);
+      if (cfg.refreshOnStart === false) return Promise.resolve(null);
+      if (!api.ek || typeof api.ek.getStudentScores !== 'function') return Promise.resolve(null);
+      if (!currentEkAccount()) return Promise.resolve(null);
+      return refreshScoresCore({ force: false }).catch(function () {
+        return null;
+      });
+    }
+
     // ── 对外 ────────────────────────────────────────────────
 
     function runInternal(preview) {
@@ -1664,6 +2047,12 @@
 
       return start
         .then(function () {
+          // 自动刷新官方成绩：仅策略启用时按 1h 缓存尝试；失败保留旧 snapshot（不阻断）
+          if (stopped) return null;
+          return maybeAutoRefresh(config);
+        })
+        .then(function () {
+          if (stopped) return null;
           return planUnirun(state, config, results);
         })
         .then(function () {
@@ -1721,6 +2110,8 @@
         return {
           ekAccount: ek && ek.user_info && ek.user_info.loginName ? String(ek.user_info.loginName) : '',
           unirunPhone: u ? String(u.phone).replace(/^(\d{3})\d{4}(\d{4})$/, '$1****$2') : '',
+          // 当前选中的 Tanma 账号 id（供 dashboard 按 module-specific 账号过滤，不暴露手机号）
+          unirunAccountId: u ? String(u.id) : '',
           unirunAccounts: accounts.items.map(function (a) {
             return { id: a.id, remark: a.remark, selected: a.id === (u && u.id) };
           }),
@@ -1729,6 +2120,100 @@
       resetState: function () {
         saveState({ done: {}, inflight: {}, failed: {}, usedImages: {}, daily: {}, qrChecks: {}, watchedEk: {} });
       },
+
+      // ── 积分缺口策略 API ──────────────────────────────────
+
+      /** 当前账号的 snapshot（不含 stale/accountMatch 元数据；元数据见 getScorePolicyStatus） */
+      getScoreSnapshot: function () {
+        var config = getConfig();
+        var snapshot = effectiveSnapshot(config);
+        return snapshot ? JSON.parse(JSON.stringify(snapshot)) : null;
+      },
+
+      /** 策略元数据：enabled/trusted/accountMatch/stale/reason/gaps/satisfiedModules/refreshedAt/source */
+      getScorePolicyStatus: function () {
+        var config = getConfig();
+        var policy = buildPolicy(config);
+        var account = currentEkAccount();
+        var entry = scoreEntry(loadScores(), account) || {};
+        return {
+          enabled: policy.enabled,
+          trusted: policy.trusted,
+          accountMatch: policy.accountMatch,
+          stale: policy.stale,
+          reason: policy.reason,
+          accountId: policy.accountId || '',
+          source: policy.source || 'unknown',
+          refreshedAt: policy.refreshedAt,
+          updatedAt: policy.refreshedAt,
+          lastAttemptAt: Number(entry.lastAttemptAt) || null,
+          lastRefreshError: entry.lastRefreshError ? String(entry.lastRefreshError) : null,
+          totalGap: policy.totalGap === undefined ? null : policy.totalGap,
+          gaps: policy.gaps || [],
+          satisfiedModules: policy.satisfiedModules || [],
+        };
+      },
+
+      /** 截图初值模板（未绑定账号；UI 需再调 importScoreSnapshot 绑定当前账号） */
+      getScreenshotInitialSnapshot: function () {
+        if (!ScorePolicy) return null;
+        return {
+          accountId: '',
+          source: 'manual',
+          updatedAt: now(),
+          modules: ScorePolicy.getScreenshotInitialModules(),
+        };
+      },
+
+      /**
+       * 导入 snapshot 并绑定当前二课账号。
+       *  - 模板（accountId 为空）：允许绑定当前账号
+       *  - 已绑定其他账号：拒绝（不静默重绑）
+       */
+      importScoreSnapshot: function (snapshot) {
+        if (!ScorePolicy) return { ok: false, reason: 'score-policy-unavailable' };
+        var account = currentEkAccount();
+        if (!account) return { ok: false, reason: 'ek-not-logged-in' };
+
+        var incomingAccount = snapshot && snapshot.accountId ? String(snapshot.accountId) : '';
+        if (incomingAccount && incomingAccount !== account) {
+          return { ok: false, reason: 'account-mismatch' };
+        }
+
+        var built;
+        try {
+          built = ScorePolicy.buildSnapshot({
+            accountId: account,
+            source: (snapshot && snapshot.source) || 'manual',
+            updatedAt: (snapshot && snapshot.updatedAt) || now(),
+            accountVerified: Boolean(snapshot && snapshot.accountVerified),
+            modules: (snapshot && snapshot.modules) || [],
+          });
+        } catch (e) {
+          return { ok: false, reason: sanitizeError(e) };
+        }
+
+        var scores = loadScores();
+        scores.accounts[account] = {
+          snapshot: built,
+          refreshedAt: built.updatedAt,
+          lastRefreshError: null,
+        };
+        try {
+          saveScores(scores);
+        } catch (e) {
+          return { ok: false, reason: 'storage-error' };
+        }
+        logger.log('[score] snapshot 已绑定账号并保存');
+        return { ok: true, snapshot: JSON.parse(JSON.stringify(built)) };
+      },
+
+      /**
+       * 刷新官方成绩（每小时最多一次；force 绕过）。实现见内部 refreshScoresCore。
+       */
+      refreshScores: function (options) {
+        return refreshScoresCore(options);
+      },
     };
   }
 
@@ -1736,7 +2221,8 @@
     DEFAULTS: DEFAULTS,
     STATE_KEY: STATE_KEY,
     CONFIG_KEY: CONFIG_KEY,
-    KEYS: { ekSession: EK_KEY, unirunAccounts: UNIRUN_ACCOUNTS_KEY },
+    SCORES_KEY: SCORES_KEY,
+    KEYS: { ekSession: EK_KEY, unirunAccounts: UNIRUN_ACCOUNTS_KEY, scores: SCORES_KEY },
     EK_SIGN_WAY_LABEL: EK_SIGN_WAY_LABEL,
     CLUB_SIGNIN_WINDOW_MIN: CLUB_SIGNIN_WINDOW_MIN,
     CLUB_SIGNOUT_WINDOW_MIN: CLUB_SIGNOUT_WINDOW_MIN,
