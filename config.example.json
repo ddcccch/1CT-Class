@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "timezone": "Asia/Shanghai",
+  "database": "runtime/auto3ct.db",
+  "adapter": null,
+  "defaults": {
+    "interval_seconds": 30,
+    "max_attempts": 3
+  },
+  "tasks": [
+    {
+      "id": "campus_run",
+      "action": "campus_run",
+      "start": "06:30",
+      "end": "07:30",
+      "weekdays": [1, 2, 3, 4, 5],
+      "enabled": false,
+      "depends_on": [],
+      "max_attempts": 2,
+      "payload": {
+        "placeholder": "待填写：跑步里程/场地等参数，启用前请替换为真实 payload"
+      }
+    },
+    {
+      "id": "club_activity",
+      "action": "club_activity",
+      "start": "18:00",
+      "end": "21:00",
+      "weekdays": [1, 3],
+      "enabled": false,
+      "depends_on": [],
+      "max_attempts": 2,
+      "payload": {
+        "placeholder": "待填写：俱乐部活动 ID，启用前请替换为真实 payload"
+      }
+    },
+    {
+      "id": "event_signup",
+      "action": "event_signup",
+      "start": "12:00",
+      "end": "13:00",
+      "weekdays": [1, 2, 3, 4, 5],
+      "enabled": false,
+      "depends_on": [],
+      "max_attempts": 2,
+      "payload": {
+        "placeholder": "待填写：二课活动 ID，启用前请替换为真实 payload"
+      }
+    },
+    {
+      "id": "event_checkin",
+      "action": "event_checkin",
+      "start": "14:00",
+      "end": "14:30",
+      "weekdays": [1, 2, 3, 4, 5],
+      "enabled": false,
+      "depends_on": ["event_signup"],
+      "max_attempts": 2,
+      "payload": {
+        "placeholder": "待填写：二课活动 ID/签到口令，启用前请替换为真实 payload"
+      }
+    },
+    {
+      "id": "event_checkout",
+      "action": "event_checkout",
+      "start": "16:00",
+      "end": "16:30",
+      "weekdays": [1, 2, 3, 4, 5],
+      "enabled": false,
+      "depends_on": ["event_checkin"],
+      "max_attempts": 2,
+      "payload": {
+        "placeholder": "待填写：二课活动 ID，启用前请替换为真实 payload"
+      }
+    }
+  ]
+}

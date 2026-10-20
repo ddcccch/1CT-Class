@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <!--
+    1CT 渲染层入口（打包时替换 dist/renderer/index.html）。
+    自包含：不引用任何外部资源，全部脚本/样式都在 asar 内。
+    CSP 基线 default-src 'self'：脚本只允许同源，图片仅本地/data/blob。
+  -->
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+  />
+  <title>1CT</title>
+  <link rel="stylesheet" href="./1ct/shell.css" />
+  <link rel="stylesheet" href="./1ct/ek-stats.css" />
+</head>
+<body>
+  <div id="one-ct-root" data-testid="one-ct-root"></div>
+  <noscript>
+    <p class="one-ct-noscript">1CT 需要启用 JavaScript 才能显示界面。</p>
+  </noscript>
+
+  <!-- 依赖顺序（defer 保证执行顺序）：引擎依赖 → 成员层 → 统计层 → 界面 shell -->
+  <script defer src="./jsQR.js"></script>
+  <script defer src="./score-policy.js"></script>
+  <script defer src="./result-store.js"></script>
+  <script defer src="./automation.js"></script>
+  <script defer src="./1ct/fallback-photo.js"></script>
+<script defer src="./1ct/members.js"></script>
+  <script defer src="./1ct/ek-stats.js"></script>
+  <script defer src="./1ct/shell.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+jsQR (UMD build recovered from 3CT renderer.js.map sourcesContent)
+Copyright (c) 2016 Cosmo Wolfe and contributors
+Licensed under the Apache License, Version 2.0:
+https://github.com/cozmo/jsQR/blob/master/LICENSE
+
+This file is bundled for offline use inside 3CT-Auto; it is not modified
+except for being copied out of the original application archive.

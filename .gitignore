@@ -1,0 +1,37 @@
+# Build outputs / original app / user data
+/1CT/
+/3CT/
+/3CT-Auto/
+/dist/
+/artifacts/
+*.exe
+*.zip
+*.asar
+*.pak
+*.dll
+*.bin
+
+# Tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+*.log
+.tmp/
+
+# Local config / secrets
+.env
+.env.*
+!.env.example
+config.local.json
+*.sqlite
+*.sqlite3
+*.db
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Third-party binary helper (not distributed)
+/desktop/1ct/assets/tools/

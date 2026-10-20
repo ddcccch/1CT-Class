@@ -1,0 +1,568 @@
+/* 3CT AutoDashboard —— 全屏「自动化看板」样式（纯本地，无外部依赖） */
+
+.auto3ct-dashboard {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483200;
+  display: none; /* open() 时设为 flex */
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(8, 10, 14, 0.82);
+  backdrop-filter: blur(6px);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  color: #e6e8ec;
+  box-sizing: border-box;
+}
+
+.auto3ct-dashboard * {
+  box-sizing: border-box;
+}
+
+.a3d-panel {
+  width: min(1120px, 100%);
+  max-height: calc(100vh - 36px);
+  display: flex;
+  flex-direction: column;
+  background: #14171d;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+/* ---------- 头部 ---------- */
+
+.a3d-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.a3d-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #f2f4f8;
+}
+
+.a3d-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4f8cff;
+  box-shadow: 0 0 10px rgba(79, 140, 255, 0.8);
+}
+
+.a3d-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- 按钮 ---------- */
+
+.a3d-btn {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.07);
+  color: #d6dae2;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.a3d-btn:hover {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.a3d-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.a3d-btn-primary {
+  border-color: rgba(79, 140, 255, 0.55);
+  background: rgba(79, 140, 255, 0.22);
+  color: #cfe0ff;
+}
+
+.a3d-btn-primary:hover {
+  background: rgba(79, 140, 255, 0.32);
+}
+
+.a3d-btn-close {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------- 消息条 ---------- */
+
+.a3d-message {
+  display: none;
+  margin: 10px 16px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.a3d-message-info {
+  color: #b9c9e8;
+  border-color: rgba(79, 140, 255, 0.35);
+  background: rgba(79, 140, 255, 0.1);
+}
+
+.a3d-message-warn {
+  color: #fcd34d;
+  border-color: rgba(252, 211, 77, 0.35);
+  background: rgba(252, 211, 77, 0.08);
+}
+
+.a3d-message-error {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+/* ---------- Tabs ---------- */
+
+.a3d-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 16px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.a3d-tab {
+  border: 0;
+  background: transparent;
+  color: #8d94a1;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+}
+
+.a3d-tab:hover {
+  color: #cfd3dc;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.a3d-tab.active {
+  color: #f2f4f8;
+  background: rgba(79, 140, 255, 0.18);
+  box-shadow: inset 0 -2px 0 #4f8cff;
+}
+
+/* ---------- 内容区 ---------- */
+
+.a3d-body {
+  overflow-y: auto;
+  padding: 14px 16px 18px;
+}
+
+.a3d-tab-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.a3d-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a9b1bf;
+  letter-spacing: 0.3px;
+}
+
+.a3d-hint {
+  font-size: 11px;
+  color: #8d94a1;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.a3d-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.a3d-empty {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #7d8491;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* ---------- 卡片 ---------- */
+
+.a3d-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  gap: 10px;
+}
+
+.a3d-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  min-width: 0;
+}
+
+.a3d-card-title {
+  font-size: 11px;
+  color: #8d94a1;
+}
+
+.a3d-card-value {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #f2f4f8;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.a3d-card-hint {
+  margin-top: 4px;
+  font-size: 10px;
+  color: #767d8a;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* ---------- 徽标 ---------- */
+
+.a3d-badge {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.a3d-badge-ok {
+  color: #86efac;
+  background: rgba(74, 222, 128, 0.12);
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.a3d-badge-gap {
+  color: #fcd34d;
+  background: rgba(252, 211, 77, 0.1);
+  border-color: rgba(252, 211, 77, 0.3);
+}
+
+.a3d-badge-warn {
+  color: #fcd34d;
+  background: rgba(252, 211, 77, 0.08);
+  border-color: rgba(252, 211, 77, 0.28);
+}
+
+.a3d-badge-error {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+.a3d-badge-unknown {
+  color: #9aa1ad;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------- 进度条 ---------- */
+
+.a3d-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.a3d-progress-row {
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.a3d-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.a3d-progress-name {
+  font-size: 12px;
+  color: #d6dae2;
+  word-break: break-word;
+}
+
+.a3d-progress-track {
+  margin-top: 6px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.a3d-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f8cff, #6ea8ff);
+  transition: width 0.25s ease;
+}
+
+.a3d-progress-fill.done {
+  background: linear-gradient(90deg, #34d399, #4ade80);
+}
+
+.a3d-progress-meta {
+  margin-top: 5px;
+  font-size: 10px;
+  color: #8d94a1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 趋势 ---------- */
+
+.a3d-trend-wrap {
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.a3d-trend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.a3d-chip {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #9aa1ad;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.a3d-chip.active {
+  color: #cfe0ff;
+  border-color: rgba(79, 140, 255, 0.5);
+  background: rgba(79, 140, 255, 0.18);
+}
+
+.a3d-trend {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.a3d-trend-bar {
+  fill: #4f8cff;
+  opacity: 0.85;
+}
+
+.a3d-trend-bar:hover {
+  opacity: 1;
+}
+
+.a3d-trend-label {
+  fill: #767d8a;
+  font-size: 9px;
+}
+
+/* ---------- 二课补分 ---------- */
+
+.a3d-score-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.a3d-score-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.a3d-score-name {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12px;
+  color: #d6dae2;
+  word-break: break-word;
+}
+
+.a3d-score-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #8d94a1;
+}
+
+.a3d-score-field .a3d-input {
+  width: 88px;
+  flex: 0 0 88px;
+}
+
+/* ---------- 表单控件 ---------- */
+
+.a3d-input {
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #e6e8ec;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  outline: none;
+  min-width: 0;
+}
+
+.a3d-input:focus {
+  border-color: rgba(79, 140, 255, 0.65);
+  box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.16);
+}
+
+/* ---------- 筛选 ---------- */
+
+.a3d-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.a3d-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  color: #8d94a1;
+}
+
+.a3d-filter .a3d-input {
+  min-width: 118px;
+}
+
+/* ---------- 明细表 ---------- */
+
+.a3d-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.a3d-table th,
+.a3d-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+.a3d-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #9aa1ad;
+  font-weight: 600;
+  background: #191d24;
+}
+
+.a3d-table td {
+  color: #c3c9d3;
+}
+
+.a3d-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.a3d-ellipsis {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 滚动条 ---------- */
+
+.a3d-body::-webkit-scrollbar {
+  width: 9px;
+}
+
+.a3d-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+}
+
+.a3d-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 窄屏 ---------- */
+
+@media (max-width: 760px) {
+  .auto3ct-dashboard {
+    padding: 8px;
+  }
+
+  .a3d-panel {
+    max-height: calc(100vh - 16px);
+  }
+
+  .a3d-head {
+    padding: 10px 12px;
+  }
+
+  .a3d-body {
+    padding: 10px 12px 14px;
+  }
+
+  .a3d-cards {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  .a3d-score-name {
+    flex-basis: 100%;
+  }
+
+  .a3d-table th,
+  .a3d-table td {
+    white-space: normal;
+  }
+}
