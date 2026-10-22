@@ -22,7 +22,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const PLAYWRIGHT_CORE =
-  process.env.PLAYWRIGHT_CORE || 'C:/Users/兑/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
+  process.env.PLAYWRIGHT_CORE || ((process.env.USERPROFILE || process.env.HOME || '.') + '/.workbuddy/binaries/node/workspace/node_modules/playwright-core');
 const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'artifacts', 'enrollment');
 // source = desktop 源文件；packaged = 从 3CT-Auto app.asar 解包的 dist/renderer
@@ -349,3 +349,4 @@ main().catch((err) => {
   console.error('enrollment smoke 异常终止：', err && err.stack ? err.stack : err);
   process.exitCode = 1;
 });
+

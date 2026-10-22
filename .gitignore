@@ -29,3 +29,14 @@ __pycache__/
 .pytest_cache/
 node_modules/
 dist/
+
+# 1CT 构建产物与本机资料（不随仓库发布）
+/1CT/
+/启动1CT.exe
+/*.zip
+/.tmp/
+/artifacts/
+/docs/ek-qr-*.md
+/docs/ek-no-qr-bypass.md
+/docs/proxy-websocket-error-diagnosis.md
+/docs/desktop-test-results.md

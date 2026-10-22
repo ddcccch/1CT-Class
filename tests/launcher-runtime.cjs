@@ -25,7 +25,7 @@ const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
 
 const PLAYWRIGHT_CORE =
-  process.env.PLAYWRIGHT_CORE || 'C:/Users/兑/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
+  process.env.PLAYWRIGHT_CORE || ((process.env.USERPROFILE || process.env.HOME || '.') + '/.workbuddy/binaries/node/workspace/node_modules/playwright-core');
 const ROOT = path.resolve(__dirname, '..');
 const ARTIFACTS = path.join(ROOT, 'artifacts');
 const LAUNCHER = path.join(ROOT, 'start-3ct-auto.cmd');
@@ -440,3 +440,4 @@ main().catch((err) => {
   console.error('launcher 运行验收异常终止：', err && err.stack ? err.stack : err);
   process.exitCode = 1;
 });
+

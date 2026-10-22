@@ -23,7 +23,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const PLAYWRIGHT_CORE =
-  process.env.PLAYWRIGHT_CORE || 'C:/Users/兑/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
+  process.env.PLAYWRIGHT_CORE || ((process.env.USERPROFILE || process.env.HOME || '.') + '/.workbuddy/binaries/node/workspace/node_modules/playwright-core');
 const ROOT = path.resolve(__dirname, '..');
 const ARTIFACTS = path.join(ROOT, 'artifacts');
 // desktop = 直接加载 desktop/ 源文件；packaged = 加载从 3CT-Auto app.asar 解包出的 dist/renderer 脚本
@@ -643,3 +643,4 @@ main().catch((err) => {
   console.error('烟测异常终止：', err && err.stack ? err.stack : err);
   process.exitCode = 1;
 });
+
