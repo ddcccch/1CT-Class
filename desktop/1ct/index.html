@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+  />
+  <title>1CT</title>
+  <link rel="stylesheet" href="./1ct/shell.css" />
+  <link rel="stylesheet" href="./1ct/ek-stats.css" />
+</head>
+<body>
+  <div id="one-ct-root" data-testid="one-ct-root"></div>
+  <noscript>
+    <p class="one-ct-noscript">1CT 需要启用 JavaScript 才能显示界面。</p>
+  </noscript>
+
+  <script defer src="./jsQR.js"></script>
+  <script defer src="./score-policy.js"></script>
+  <script defer src="./result-store.js"></script>
+  <script defer src="./automation.js"></script>
+  <script defer src="./1ct/fallback-photo.js"></script>
+  <script defer src="./1ct/members.js"></script>
+  <script defer src="./1ct/ek-stats.js"></script>
+  <script defer src="./1ct/shell.js"></script>
+</body>
+</html>
