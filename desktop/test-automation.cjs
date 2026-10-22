@@ -904,14 +904,14 @@ test('俱乐部成功码 1000 与 10000 都算成功', async () => {
   assert.equal(out.results.find((x) => x.action === 'join').status, 'success');
 });
 
-test('俱乐部签到窗口 [start,start+5min]、签退窗口 [end-5min,end]；坐标取 getSignInTf', async () => {
+test('俱乐部签到窗口 [start,start+15min]、签退窗口 [end-15min,end]（可配置）；坐标取 currentSignTask', async () => {
   const myList = { code: 10000, response: { list: [clubItem({ optionStatus: '1' })] } };
   // 签退用例前提：官方已签到
   const myListSignedIn = {
     code: 10000,
     response: { list: [clubItem({ optionStatus: '1', signInStatus: '1' })] },
   };
-  const run = async (clockMs, listOverride) => {
+  const run = async (clockMs, listOverride, clubConfig) => {
     const api = makeApi({
       club: {
         myActivityList: listOverride || myList,
@@ -921,7 +921,11 @@ test('俱乐部签到窗口 [start,start+5min]、签退窗口 [end-5min,end]；�
         },
       },
     });
-    const { engine } = makeEngine({ api, clock: makeClock(clockMs), config: { club: { keywords: ['篮球'] } } });
+    const { engine } = makeEngine({
+      api,
+      clock: makeClock(clockMs),
+      config: { club: Object.assign({ keywords: ['篮球'] }, clubConfig || {}) },
+    });
     const out = await engine.runOnce();
     return { api, out };
   };
@@ -935,12 +939,24 @@ test('俱乐部签到窗口 [start,start+5min]、签退窗口 [end-5min,end]；�
     assert.equal(call.payload.longitude, '104.1');
   }
   {
-    const { api, out } = await run(BJ(2026, 9, 21, 18, 10)); // 已过签到窗口
+    // 默认窗口 15 分钟：18:10 仍在窗口内（旧的固定 5 分钟会判 expired）
+    const { api, out } = await run(BJ(2026, 9, 21, 18, 10));
+    assert.equal(out.results.find((x) => x.action === 'signIn').status, 'success');
+    assert.equal(api.__count('club.signInOrSignBack'), 1);
+  }
+  {
+    const { api, out } = await run(BJ(2026, 9, 21, 18, 16)); // 已过默认签到窗口
     assert.equal(api.__count('club.signInOrSignBack'), 0);
     assert.equal(out.results.find((x) => x.action === 'signIn').status, 'expired');
   }
   {
-    const { api, out } = await run(BJ(2026, 9, 21, 18, 57), myListSignedIn); // 签退窗口 [18:55,19:00]
+    // 可配置：显式 signInWindowMinutes=5 恢复旧窗口宽度
+    const { api, out } = await run(BJ(2026, 9, 21, 18, 10), null, { signInWindowMinutes: 5 });
+    assert.equal(api.__count('club.signInOrSignBack'), 0);
+    assert.equal(out.results.find((x) => x.action === 'signIn').status, 'expired');
+  }
+  {
+    const { api, out } = await run(BJ(2026, 9, 21, 18, 50), myListSignedIn); // 签退窗口 [18:45,19:00]
     assert.equal(out.results.find((x) => x.action === 'signOut').status, 'success');
     assert.equal(api.__calls.find((c) => c.name === 'club.signInOrSignBack').payload.signType, '2');
   }
@@ -2232,4 +2248,463 @@ test('空关键词且未开 allowAll：不扫描 status=0，但仍扫描 status=
   const signIn = out.results.find((r) => r.action === 'signIn');
   assert.ok(signIn, '官方已报名活动仍必须进入签到流程');
   assert.equal(signIn.status, 'success', JSON.stringify(signIn));
+});
+
+// ═════════════ 有界重试 / 失败原因落盘 / 俱乐部窗口与坐标（task-6） ═════════════
+
+/** 二课签到 key（便于直接断言 state） */
+function ekSignKey(action = 'signIn', activityId = 'act-1') {
+  return '2026-09-21|' + EK_LOGIN_NAME + '|ek|' + activityId + '|' + action;
+}
+
+function readState(storage) {
+  return JSON.parse(storage.get('auto3ct:state'));
+}
+
+test('二课拍照签到：首次被拒不锁死，下一轮重试成功；失败原因落盘并随行返回', async () => {
+  let submissions = 0;
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+      getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
+      activityBoundImages: { items: [{ id: 'p1', file_url: 'https://cdn.example/p1.jpg' }] },
+      imageUploadToSignActivity: { url: 'http://ek.cuit.edu.cn/official/p1.jpg' },
+      signInOutByOthers: () => {
+        submissions += 1;
+        return submissions === 1 ? { errcode: 1, errmsg: '签到时间未开始' } : { errcode: 0 };
+      },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 5));
+  const { engine, storage, logs } = makeEngine({
+    api,
+    clock,
+    config: { ek: { keywords: ['歌手'], qrDelayMinutes: 0, qrRetryMinutes: 2, qrMaxAttempts: 3 } },
+  });
+
+  const first = await engine.runOnce();
+  const r1 = first.results.find((x) => x.action === 'signIn');
+  assert.equal(r1.status, 'failed', JSON.stringify(r1));
+  assert.match(String(r1.detail), /errcode=1/);
+  assert.match(String(r1.detail), /签到时间未开始/);
+  assert.equal(r1.attempts, 1);
+  assert.equal(r1.maxAttempts, 3);
+  assert.equal(r1.retryable, true);
+
+  // 首次失败：不写 failed 终态，但原因必须落盘（用户事后能看到为什么失败）
+  const st1 = readState(storage);
+  assert.equal(st1.failed[ekSignKey()], undefined, '未到尝试上限不得写 failed 终态');
+  assert.ok(st1.lastFailure[ekSignKey()], '必须在 state.lastFailure 留下失败原因');
+  assert.match(String(st1.lastFailure[ekSignKey()].detail), /签到时间未开始/);
+  assert.ok(logs.some((l) => l.includes('签到时间未开始')), '日志也要能看到学校端原因');
+
+  // 重试间隔内不重复提交
+  clock.advance(30 * 1000);
+  const second = await engine.runOnce();
+  const r2 = second.results.find((x) => x.action === 'signIn');
+  assert.equal(r2.status, 'waiting-material');
+  assert.equal(r2.reason, 'photo-retry-pending');
+  assert.equal(submissions, 1);
+
+  // 到间隔 → 重试成功，落 done
+  clock.advance(90 * 1000);
+  const third = await engine.runOnce();
+  const r3 = third.results.find((x) => x.action === 'signIn');
+  assert.equal(r3.status, 'success', JSON.stringify(r3));
+  assert.equal(submissions, 2);
+  assert.ok(readState(storage).done[ekSignKey()], '成功后必须落 done');
+});
+
+test('二课拍照签到：用完 maxAttempts 才锁死，之后行是 blocked locked-failed（带原因）', async () => {
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+      getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
+      activityBoundImages: { items: [] },
+      signInOutByOthers: { errcode: 2, errmsg: '照片不合格' },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 5));
+  const { engine, storage } = makeEngine({
+    api,
+    clock,
+    config: { ek: { keywords: ['歌手'], qrDelayMinutes: 0, qrRetryMinutes: 2, qrMaxAttempts: 2 } },
+  });
+
+  const first = await engine.runOnce();
+  const r1 = first.results.find((x) => x.action === 'signIn');
+  assert.equal(r1.status, 'failed');
+  assert.equal(r1.attempts, 1);
+  assert.equal(readState(storage).failed[ekSignKey()], undefined, '第 1/2 次失败仍不锁死');
+
+  clock.advance(2 * 60 * 1000);
+  const second = await engine.runOnce();
+  const r2 = second.results.find((x) => x.action === 'signIn');
+  assert.equal(r2.status, 'failed');
+  assert.equal(r2.attempts, 2);
+  assert.equal(r2.retryable, false, '到上限后应标记不可再重试');
+  const st2 = readState(storage);
+  assert.equal(st2.failed[ekSignKey()].status, 'failed');
+  assert.equal(st2.failed[ekSignKey()].attempts, 2);
+  assert.match(String(st2.failed[ekSignKey()].lastError), /照片不合格/);
+  assert.equal(api.__count('ek.signInOutByOthers'), 2);
+
+  clock.advance(2 * 60 * 1000);
+  const third = await engine.runOnce();
+  const r3 = third.results.find((x) => x.action === 'signIn');
+  assert.equal(r3.status, 'blocked');
+  assert.equal(r3.reason, 'locked-failed');
+  assert.match(String(r3.detail), /照片不合格/, 'locked 行也要带上次失败原因');
+  assert.equal(api.__count('ek.signInOutByOthers'), 2, '锁定后不再提交');
+});
+
+test('二课拍照签到：窗口开始后延迟 photoDelayMinutes 才提交（缺省沿用 qrDelayMinutes）', async () => {
+  const build = (clockMs, ekConfig) => {
+    const api = makeApi({
+      ek: {
+        getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+        getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
+        activityBoundImages: { items: [] },
+      },
+    });
+    const clock = makeClock(clockMs);
+    const { engine } = makeEngine({ api, clock, config: { ek: Object.assign({ keywords: ['歌手'] }, ekConfig) } });
+    return { api, clock, engine };
+  };
+
+  {
+    const { api, clock, engine } = build(BJ(2026, 9, 21, 18, 0), { qrDelayMinutes: 2 });
+    const first = await engine.runOnce();
+    const r1 = first.results.find((x) => x.action === 'signIn');
+    assert.equal(r1.status, 'not-yet');
+    assert.equal(r1.reason, 'before-photo-gate');
+    assert.equal(api.__count('ek.signInOutByOthers'), 0, '到 gate 前不得提交');
+    clock.advance(2 * 60 * 1000);
+    const second = await engine.runOnce();
+    assert.equal(second.results.find((x) => x.action === 'signIn').status, 'success');
+  }
+  {
+    // photoDelayMinutes 显式覆盖（0 = 窗口一开始就提交）
+    const { engine } = build(BJ(2026, 9, 21, 18, 0), { qrDelayMinutes: 5, photoDelayMinutes: 0 });
+    const out = await engine.runOnce();
+    assert.equal(out.results.find((x) => x.action === 'signIn').status, 'success');
+  }
+  {
+    // 延迟超过窗口 → 明确提示，不静默永不触发
+    const { engine } = build(BJ(2026, 9, 21, 18, 0), { photoDelayMinutes: 40 });
+    const out = await engine.runOnce();
+    const r = out.results.find((x) => x.action === 'signIn');
+    assert.equal(r.status, 'waiting-material');
+    assert.equal(r.reason, 'photo-delay-exceeds-window');
+  }
+});
+
+test('二课二维码签到：首次 errcode 非 0 不锁死，下一轮重试成功', async () => {
+  let qrSubmits = 0;
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+      getActivityDetail: ekDetail(),
+      activityBoundImages: {
+        items: [{ id: 'img1', file_url: 'https://x/1.png', created_at: '2026-09-21 18:01:00' }],
+      },
+      signByQr: () => {
+        qrSubmits += 1;
+        return qrSubmits === 1 ? { errcode: 3, errmsg: '二维码已过期' } : { errcode: 0 };
+      },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 5));
+  const { engine, storage } = makeEngine({
+    api,
+    clock,
+    decodeQr: async () => 'lbUUh-abc',
+    config: { ek: { keywords: ['歌手'], qrDelayMinutes: 0, qrRetryMinutes: 2, qrMaxAttempts: 3 } },
+  });
+
+  const first = await engine.runOnce();
+  const r1 = first.results.find((x) => x.action === 'signIn');
+  assert.equal(r1.status, 'failed', JSON.stringify(r1));
+  assert.match(String(r1.detail), /二维码已过期/);
+  assert.equal(r1.attempts, 1);
+  assert.equal(readState(storage).failed[ekSignKey()], undefined, '有重试余额时不得锁死');
+
+  clock.advance(2 * 60 * 1000);
+  const second = await engine.runOnce();
+  assert.equal(second.results.find((x) => x.action === 'signIn').status, 'success');
+  assert.equal(qrSubmits, 2);
+  assert.ok(readState(storage).done[ekSignKey()]);
+});
+
+test('二课签到：响应缺 errcode（unknown）即使有重试余额也立即锁定', async () => {
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+      getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
+      activityBoundImages: { items: [] },
+      signInOutByOthers: { ok: true }, // 无 errcode → 结果不确定
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 5));
+  const { engine, storage } = makeEngine({
+    api,
+    clock,
+    config: { ek: { keywords: ['歌手'], qrDelayMinutes: 0, qrRetryMinutes: 2, qrMaxAttempts: 3 } },
+  });
+  const first = await engine.runOnce();
+  assert.equal(first.results.find((x) => x.action === 'signIn').status, 'unknown');
+  assert.equal(readState(storage).failed[ekSignKey()].status, 'unknown');
+
+  clock.advance(2 * 60 * 1000);
+  const second = await engine.runOnce();
+  const r2 = second.results.find((x) => x.action === 'signIn');
+  assert.equal(r2.status, 'blocked');
+  assert.equal(r2.reason, 'locked-unknown');
+  assert.equal(api.__count('ek.signInOutByOthers'), 1, 'unknown 不重试，防重复提交');
+});
+
+test('俱乐部签到：一次被拒不锁死整天，下一轮重试成功；原因落盘并可读', async () => {
+  let submits = 0;
+  const api = makeApi({
+    club: {
+      myActivityList: { code: 10000, response: { list: [clubItem({ optionStatus: '1' })] } },
+      currentSignTask: {
+        code: 10000,
+        response: { clubActivityId: 1001, latitude: '30.5', longitude: '104.1' },
+      },
+      signInOrSignBack: () => {
+        submits += 1;
+        return submits === 1 ? { code: 500, msg: '定位不在签到范围内' } : { code: 10000 };
+      },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 3));
+  const { engine, storage, logs } = makeEngine({
+    api,
+    clock,
+    config: { club: { keywords: ['篮球'], retryMaxAttempts: 3, retryIntervalMinutes: 2 } },
+  });
+
+  const first = await engine.runOnce();
+  const r1 = first.results.find((x) => x.action === 'signIn');
+  assert.equal(r1.status, 'failed', JSON.stringify(r1));
+  assert.match(String(r1.detail), /code=500/);
+  assert.match(String(r1.detail), /定位不在签到范围内/);
+  assert.equal(r1.attempts, 1);
+  assert.deepEqual(Object.keys(readState(storage).failed), [], '有重试余额时不得写 failed 终态');
+  assert.ok(logs.some((l) => l.includes('定位不在签到范围内')), '日志要能看到俱乐部端原因');
+
+  clock.advance(30 * 1000);
+  const second = await engine.runOnce();
+  const r2 = second.results.find((x) => x.action === 'signIn');
+  assert.equal(r2.status, 'waiting-material');
+  assert.equal(r2.reason, 'club-retry-pending');
+  assert.equal(submits, 1, '重试间隔内不得重复提交');
+
+  clock.advance(90 * 1000);
+  const third = await engine.runOnce();
+  assert.equal(third.results.find((x) => x.action === 'signIn').status, 'success');
+  assert.equal(submits, 2);
+  assert.ok(
+    Object.keys(readState(storage).done).some((k) => k.endsWith('|club|1001|signIn')),
+    '重试成功后落 done',
+  );
+});
+
+test('俱乐部签到：用完 retryMaxAttempts 才锁死，之后 blocked locked-failed', async () => {
+  const api = makeApi({
+    club: {
+      myActivityList: { code: 10000, response: { list: [clubItem({ optionStatus: '1' })] } },
+      currentSignTask: {
+        code: 10000,
+        response: { clubActivityId: 1001, latitude: '30.5', longitude: '104.1' },
+      },
+      signInOrSignBack: { code: 400, msg: '签到失败，请稍后重试' },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 3));
+  const { engine, storage } = makeEngine({
+    api,
+    clock,
+    config: { club: { keywords: ['篮球'], retryMaxAttempts: 2, retryIntervalMinutes: 1 } },
+  });
+
+  const first = await engine.runOnce();
+  assert.equal(first.results.find((x) => x.action === 'signIn').status, 'failed');
+  assert.deepEqual(Object.keys(readState(storage).failed), []);
+
+  clock.advance(60 * 1000);
+  const second = await engine.runOnce();
+  assert.equal(second.results.find((x) => x.action === 'signIn').status, 'failed');
+  const st = readState(storage);
+  const failedKey = Object.keys(st.failed).find((k) => k.endsWith('|club|1001|signIn'));
+  assert.ok(failedKey, '到上限必须写 failed 终态');
+  assert.equal(st.failed[failedKey].attempts, 2);
+  assert.match(String(st.failed[failedKey].lastError), /签到失败/);
+  assert.equal(api.__count('club.signInOrSignBack'), 2);
+
+  clock.advance(5 * 60 * 1000);
+  const third = await engine.runOnce();
+  const r3 = third.results.find((x) => x.action === 'signIn');
+  assert.equal(r3.status, 'blocked');
+  assert.equal(r3.reason, 'locked-failed');
+  assert.match(String(r3.detail), /签到失败/);
+  assert.equal(api.__count('club.signInOrSignBack'), 2, '锁定后不再提交');
+});
+
+test('俱乐部坐标：默认不回退活动列表坐标（need-coords）；开启 allowActivityCoords 才用并在 detail 标注', async () => {
+  // 龙泉驿校区坐标（正是用户「报到另一个校区」的事故来源）
+  const listed = {
+    code: 10000,
+    response: { list: [clubItem({ optionStatus: '1', latitude: '29.6012', longitude: '106.3012' })] },
+  };
+  const build = async (clubConfig, currentSignTask) => {
+    const api = makeApi({
+      club: {
+        myActivityList: listed,
+        currentSignTask: currentSignTask === undefined ? { code: 10000, response: null } : currentSignTask,
+      },
+    });
+    const { engine } = makeEngine({
+      api,
+      clock: makeClock(BJ(2026, 9, 21, 18, 3)),
+      config: { club: Object.assign({ keywords: ['篮球'] }, clubConfig || {}) },
+    });
+    const out = await engine.runOnce();
+    return { api, out, r: out.results.find((x) => x.action === 'signIn') };
+  };
+
+  {
+    const { api, r } = await build();
+    assert.equal(r.status, 'waiting-material');
+    assert.equal(r.reason, 'need-coords');
+    assert.equal(api.__count('club.signInOrSignBack'), 0, '默认绝不用活动列表坐标（可能是另一个校区）');
+  }
+  {
+    const { api, r } = await build({ allowActivityCoords: true });
+    assert.equal(r.status, 'success', JSON.stringify(r));
+    assert.equal(r.coordSource, 'activity-coords');
+    assert.equal(r.detail, 'activity-coords', '结果行 detail 必须标注坐标来源 activity-coords');
+    const call = api.__calls.find((c) => c.name === 'club.signInOrSignBack');
+    assert.equal(call.payload.latitude, '29.6012');
+    assert.equal(call.payload.longitude, '106.3012');
+  }
+  {
+    // currentSignTask 存在但活动 id 不一致 → 不得使用它的坐标
+    const mismatch = { code: 10000, response: { clubActivityId: 9999, latitude: '30.5', longitude: '104.1' } };
+    const { api, r } = await build({ allowActivityCoords: true }, mismatch);
+    assert.equal(r.status, 'success', JSON.stringify(r));
+    const call = api.__calls.find((c) => c.name === 'club.signInOrSignBack');
+    assert.equal(call.payload.latitude, '29.6012', 'id 不一致的 currentSignTask 坐标必须丢弃');
+    assert.equal(call.payload.longitude, '106.3012');
+  }
+});
+
+test('失败原因脱敏：detail / lastFailure / 日志不含密码、token、JSESSIONID、完整手机号', async () => {
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+      getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
+      activityBoundImages: { items: [] },
+      signInOutByOthers: {
+        errcode: 1,
+        errmsg: '提交失败 JSESSIONID=sid123456 password=pw token=tok 手机号 13800000000 请重试',
+      },
+    },
+  });
+  const { engine, storage, logs } = makeEngine({
+    api,
+    clock: makeClock(BJ(2026, 9, 21, 18, 5)),
+    config: { ek: { keywords: ['歌手'], qrDelayMinutes: 0, qrMaxAttempts: 1 } },
+  });
+  const out = await engine.runOnce();
+  const r = out.results.find((x) => x.action === 'signIn');
+  assert.ok(r.detail, '必须带失败原因');
+  assert.ok(r.detail.includes('提交失败'), '保留学校端可读原因');
+  assert.ok(r.detail.includes('errcode=1'));
+
+  const dump = JSON.stringify(out) + JSON.stringify(logs) + String(storage.get('auto3ct:state'));
+  assert.equal(dump.includes('sid123456'), false, '不得出现 JSESSIONID 明文');
+  assert.equal(dump.includes('password=pw'), false, '不得出现密码');
+  assert.equal(dump.includes('token=tok'), false, '不得出现 token');
+  assert.equal(dump.includes(EK_ACCOUNT.phone), false, '不得出现完整手机号');
+});
+
+test('失败原因截断：detail 不超过 200 字（不把整包响应落盘）', async () => {
+  const longMsg = '失败'.repeat(300);
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem({ ActivityStatus: '1' })] } },
+      getActivityDetail: ekDetail({}, { SignWay: 2, SignWayText: '拍照' }),
+      activityBoundImages: { items: [] },
+      signInOutByOthers: { errcode: 1, errmsg: longMsg, data: { errmsg: longMsg } },
+    },
+  });
+  const { engine, storage } = makeEngine({
+    api,
+    clock: makeClock(BJ(2026, 9, 21, 18, 5)),
+    config: { ek: { keywords: ['歌手'], qrDelayMinutes: 0, qrMaxAttempts: 1 } },
+  });
+  const out = await engine.runOnce();
+  const r = out.results.find((x) => x.action === 'signIn');
+  assert.ok(r.detail.length <= 200, 'detail 必须截断到 200 字，实际 ' + r.detail.length);
+  assert.ok(readState(storage).lastFailure[ekSignKey()].detail.length <= 200);
+});
+
+test('俱乐部签到 dry-run 不消耗重试预算（试跑多轮后仍可正常提交）', async () => {
+  const storage = baseStorage();
+  const api = makeApi({
+    club: {
+      myActivityList: { code: 10000, response: { list: [clubItem({ optionStatus: '1' })] } },
+      currentSignTask: {
+        code: 10000,
+        response: { clubActivityId: 1001, latitude: '30.5', longitude: '104.1' },
+      },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 18, 3));
+  const dry = makeEngine({
+    api,
+    storage,
+    clock,
+    config: { dryRun: true, club: { keywords: ['篮球'], retryMaxAttempts: 1, retryIntervalMinutes: 2 } },
+  });
+  for (let i = 0; i < 3; i += 1) {
+    const out = await dry.engine.runOnce();
+    assert.equal(out.results.find((x) => x.action === 'signIn').status, 'dry-run');
+  }
+  assert.equal(api.__count('club.signInOrSignBack'), 0);
+  const rawState = storage.get('auto3ct:state');
+  const st = rawState ? JSON.parse(rawState) : {};
+  assert.deepEqual(Object.keys(st.clubChecks || {}), [], 'dry-run 不得消耗重试预算');
+
+  // 同一 state 换真跑：预算没被烧掉，仍能提交
+  const real = makeEngine({
+    api,
+    storage,
+    clock,
+    config: { dryRun: false, club: { keywords: ['篮球'], retryMaxAttempts: 1, retryIntervalMinutes: 2 } },
+  });
+  const out = await real.engine.runOnce();
+  assert.equal(out.results.find((x) => x.action === 'signIn').status, 'success');
+  assert.equal(api.__count('club.signInOrSignBack'), 1);
+});
+
+test('二课报名仍是一次失败即终态（未传 attempts 的调用方行为不变）', async () => {
+  const api = makeApi({
+    ek: {
+      getActivitiesList: { List: { Items: [ekItem()] } },
+      getActivityDetail: ekDetail({}, {}, null),
+      applyActivity: { errcode: 5, errmsg: '名额已满' },
+    },
+  });
+  const clock = makeClock(BJ(2026, 9, 21, 8, 0));
+  const { engine } = makeEngine({ api, clock, config: { ek: { keywords: ['歌手'] } } });
+  const first = await engine.runOnce();
+  const r1 = first.results.find((x) => x.action === 'apply');
+  assert.equal(r1.status, 'failed');
+  assert.match(String(r1.detail), /名额已满/);
+  const second = await engine.runOnce();
+  assert.equal(second.results.find((x) => x.action === 'apply').reason, 'locked-failed');
+  assert.equal(api.__count('ek.applyActivity'), 1);
 });

@@ -45,8 +45,13 @@
   /** 校园跑/俱乐部账号真实键（renderer/services/unirunAccounts.ts） */
   var UNIRUN_ACCOUNTS_KEY = 'ct_unirun_accounts_v1';
 
-  var CLUB_SIGNIN_WINDOW_MIN = 5;
-  var CLUB_SIGNOUT_WINDOW_MIN = 5;
+  /**
+   * 俱乐部签到/签退窗口默认宽度（分钟）。
+   * 历史上固定 5 分钟，实测太窄（用户进场/找定位的时延就会错过），默认改为 15 分钟；
+   * 仍可用 `club.signInWindowMinutes` / `club.signOutWindowMinutes` 覆盖。
+   */
+  var CLUB_SIGNIN_WINDOW_MIN = 15;
+  var CLUB_SIGNOUT_WINDOW_MIN = 15;
 
   var DEFAULTS = {
     dryRun: true,
@@ -96,6 +101,23 @@
       signIn: true,
       signOut: true,
       dailyJoinLimit: 1,
+      /** 签到窗口 = [活动开始, 开始 + N 分钟]（默认 15，旧行为固定 5 分钟） */
+      signInWindowMinutes: CLUB_SIGNIN_WINDOW_MIN,
+      /** 签退窗口 = [活动结束 - N 分钟, 活动结束]（默认 15，旧行为固定 5 分钟） */
+      signOutWindowMinutes: CLUB_SIGNOUT_WINDOW_MIN,
+      /**
+       * 签到/签退失败重试：最多 N 次尝试、两次之间至少间隔 M 分钟。
+       * 只有「学校端明确拒绝（failed）」才重试；unknown（结果不确定）仍立即锁定。
+       */
+      retryMaxAttempts: 3,
+      retryIntervalMinutes: 2,
+      /**
+       * 坐标来源兜底开关（默认 false）：
+       *  - false：只接受 currentSignTask 下发且 activityId 与活动一致时的坐标；
+       *  - true ：缺失时允许用活动列表里的 latitude/longitude 兜底，并在结果行 detail 标注 activity-coords。
+       * 默认关闭是因为列表坐标可能是另一个校区（用户实测「报到龙泉校区」）。
+       */
+      allowActivityCoords: false,
     },
     ek: {
       enabled: false,
@@ -107,6 +129,11 @@
       dailyLimit: 1,
       /** 二维码延迟触发：官方窗口开始后延迟 N 分钟才首次拉图库 */
       qrDelayMinutes: 2,
+      /**
+       * 拍照/定位签到（SignWay=2/3）延迟触发：官方窗口开始后延迟 N 分钟才提交。
+       * null/未配置 → 沿用 `qrDelayMinutes`（默认 2 分钟），与二维码分支行为一致。
+       */
+      photoDelayMinutes: null,
       /** 空/未识别后，下次尝试的间隔（分钟） */
       qrRetryMinutes: 2,
       /** 每阶段每天最多拉几次图库（总上限） */
@@ -507,13 +534,75 @@
     return out;
   }
 
-  function sanitizeError(e) {
-    var text = e && e.message ? String(e.message) : String(e == null ? '' : e);
-    return text
+  /**
+   * 统一脱敏口径（sanitizeError / 上游失败原因共用）：
+   *  - password / token / JSESSIONID 等键值对一律打码；
+   *  - 完整手机号打码；
+   *  - 压缩空白并截断，避免把整包响应写进日志/结果。
+   */
+  function redactText(text, maxLen) {
+    return String(text == null ? '' : text)
       .replace(/(password|access_token|refresh_token|JSESSIONID|token)\s*[:=]\s*[^\s,;]+/gi, '$1=***')
       .replace(/\b1[3-9]\d{9}\b/g, '1**********')
       .replace(/\s+/g, ' ')
-      .slice(0, 140);
+      .trim()
+      .slice(0, maxLen || 200);
+  }
+
+  function sanitizeError(e) {
+    var text = e && e.message ? String(e.message) : String(e == null ? '' : e);
+    return redactText(text, 140);
+  }
+
+  /** 从响应里取第一个非空文本字段（不整包 JSON 落盘，只取明确的报错文案） */
+  function firstText(candidates) {
+    for (var i = 0; i < candidates.length; i += 1) {
+      var v = candidates[i];
+      if (v === undefined || v === null) continue;
+      var text = String(v).trim();
+      if (text) return text;
+    }
+    return '';
+  }
+
+  /**
+   * 上游业务失败原因（脱敏、截断 200 字）。
+   *  - 二课：`res.errcode` / `res.errmsg`（含 `data` 嵌套）
+   *  - 俱乐部/校园跑：`res.code` / `res.msg`
+   * 只提取明确的报错字段，绝不整包 JSON 落盘；取不到时返回 ''（不伪造原因）。
+   */
+  function upstreamFailureDetail(moduleName, res) {
+    if (!res || typeof res !== 'object') return '';
+    var inner =
+      res.data && typeof res.data === 'object'
+        ? res.data
+        : res.response && typeof res.response === 'object'
+          ? res.response
+          : null;
+    var codeLabel = moduleName === 'ek' ? 'errcode' : 'code';
+    var codeValue;
+    if (moduleName === 'ek') {
+      if (res.errcode !== undefined && res.errcode !== null) codeValue = res.errcode;
+      else if (inner && inner.errcode !== undefined && inner.errcode !== null) codeValue = inner.errcode;
+    } else if (res.code !== undefined && res.code !== null) {
+      codeValue = res.code;
+    } else if (inner && inner.code !== undefined && inner.code !== null) {
+      codeValue = inner.code;
+    }
+    var msg = firstText([
+      moduleName === 'ek' ? res.errmsg : res.msg,
+      moduleName === 'ek' ? res.msg : res.errmsg,
+      res.message,
+      inner && (moduleName === 'ek' ? inner.errmsg : inner.msg),
+      inner && inner.message,
+    ]);
+    var parts = [];
+    if (codeValue !== undefined && codeValue !== null && String(codeValue).trim() !== '') {
+      parts.push(codeLabel + '=' + redactText(codeValue, 32));
+    }
+    if (msg) parts.push('errmsg=' + msg);
+    if (parts.length === 0) return '';
+    return redactText(parts.join(' '), 200);
   }
 
   // ─────────────────────────── mergeConfig ───────────────────────────
@@ -596,6 +685,20 @@
       }
     }
 
+    /**
+     * lastFailure 只保留最近 7 天：纯诊断数据，过期即无价值，避免 state 无界增长。
+     */
+    function pruneLastFailure(raw) {
+      var src = raw && typeof raw === 'object' ? raw : {};
+      var out = {};
+      var keepMs = 7 * 24 * 60 * 60 * 1000;
+      Object.keys(src).forEach(function (k) {
+        var at = Number(src[k] && src[k].at) || 0;
+        if (at > 0 && now() - at <= keepMs) out[k] = src[k];
+      });
+      return out;
+    }
+
     /** 读取状态；损坏直接抛（禁止静默空态） */
     function loadState() {
       var s = readJson(STATE_KEY);
@@ -608,6 +711,8 @@
           daily: {},
           qrChecks: {},
           photoChecks: {},
+          clubChecks: {},
+          lastFailure: {},
           watchedEk: {},
           // 已结束的二课活动归档（跨 tick / 跨进程持久）：{ [account]: { [activityId]: {at, expireAt} } }
           ekFinished: {},
@@ -631,6 +736,10 @@
         qrChecks: s.qrChecks && typeof s.qrChecks === 'object' ? s.qrChecks : {},
         // 拍照/定位签到尝试计数（与二维码分开记账）：{ [key]: {count,lastAt} }
         photoChecks: s.photoChecks && typeof s.photoChecks === 'object' ? s.photoChecks : {},
+        // 俱乐部签到/签退尝试计数：{ [key]: {count,lastAt} }
+        clubChecks: s.clubChecks && typeof s.clubChecks === 'object' ? s.clubChecks : {},
+        // 最近一次业务失败原因（脱敏、截断 200 字）：{ [key]: {detail, attempts, at} }
+        lastFailure: pruneLastFailure(s.lastFailure),
         // 关注中的二课活动（跨 tick / 跨进程持久）：{ [account]: { [activityId]: {name, addedAt, expireAt?} } }
         watchedEk: s.watchedEk && typeof s.watchedEk === 'object' ? s.watchedEk : {},
         // 已结束的二课活动归档（各签到/签退窗口都已结束）：{ [account]: { [activityId]: {at, expireAt} } }
@@ -655,6 +764,8 @@
         daily: state.daily || {},
         qrChecks: state.qrChecks || {},
         photoChecks: state.photoChecks || {},
+        clubChecks: state.clubChecks || {},
+        lastFailure: state.lastFailure || {},
         watchedEk: state.watchedEk || {},
         // 已结束活动归档：随 state 一起持久化（预览模式被 previewMode 拦住，不落盘）
         ekFinished: state.ekFinished || {},
@@ -972,17 +1083,62 @@
       state.daily[key] = dailyCount(state, key) + 1;
     }
 
+    /** 已锁定终态的附加诊断字段：把上次上游失败原因带给界面/日志（已脱敏） */
+    function lockedRowExtra(locked, baseExtra) {
+      var extra = mergeConfig(baseExtra || {});
+      if (locked && locked.lastError) extra.detail = String(locked.lastError);
+      if (locked && locked.attempts) extra.attempts = Number(locked.attempts) || 0;
+      return extra;
+    }
+
+    /**
+     * 提交前的本地终态短路（done / failed 锁定）。
+     * 供「自己管理尝试预算」的调用方（二课二维码/拍照、俱乐部）在消耗预算前先判一次，
+     * 避免「已达上限/已锁定」时把行状态从 blocked·locked-* 改写成 waiting-material。
+     * 返回 null 表示可以继续。
+     */
+    function settledRow(state, moduleName, action, activityId, key, extra) {
+      if (state.done[key]) {
+        return row(moduleName, action, activityId, 'skipped', 'already-done', mergeConfig(extra || {}, { key: key }));
+      }
+      var locked = state.failed[key];
+      if (locked) {
+        return row(
+          moduleName,
+          action,
+          activityId,
+          'blocked',
+          'locked-' + String(locked.status || 'failed'),
+          lockedRowExtra(locked, mergeConfig(extra || {}, { key: key })),
+        );
+      }
+      return null;
+    }
+
     /**
      * 单动作执行（安全核心）。
      *  - state 损坏 / inflight / failed 终态 → 直接阻塞，不提交；
      *  - dry-run → 只出预览行；
      *  - 提交前先持久化 inflight，**写失败则不提交**（fail-closed）；
-     *  - 成功落 done；业务失败落 failed 终态；异常保留 inflight 并落 unknown 终态；
+     *  - 成功落 done；业务失败落 failed 终态（有界重试未用尽时先不落）；异常保留 inflight 并落 unknown 终态；
      *  - 落盘失败一律告警，且内存态仍保留，避免同进程重复提交。
+     *
+     * 有界重试（可选）：调用方通过
+     *  - `meta.attemptsSoFar`：本次是第几次尝试（1 起算，调用方自己的计数器已自增）
+     *  - `meta.maxAttempts`：本阶段允许的最大尝试次数
+     * 传入时，`failed` 且 attemptsSoFar < maxAttempts 不写 state.failed（下一 tick 继续用新码/新图重试）；
+     * 达到上限才落 failed 终态。`unknown`（结果不确定）永远立即锁定，防止重复提交。
+     * 不传这两个字段（如二课报名）→ 保持「一次失败即终态」的旧行为。
      */
     function perform(state, meta, submit, classify) {
       var key = meta.key;
       var config = meta.config;
+      var attemptNo = Number(meta.attemptsSoFar);
+      if (!Number.isFinite(attemptNo) || attemptNo <= 0) attemptNo = 0;
+      var maxAttempts = Number(meta.maxAttempts);
+      if (!Number.isFinite(maxAttempts) || maxAttempts <= 0) maxAttempts = 0;
+      /** 还有重试余额：本次失败不落终态，交给下一 tick 再试（由调用方计数器收敛） */
+      var canRetry = attemptNo > 0 && maxAttempts > 0 && attemptNo < maxAttempts;
       /**
        * 所有结果行（含 skipped/dry-run/blocked 等提前返回）都带上本次窗口值，
        * 便于日志/看板排查「为什么今天 08:10 就 expired 了」——
@@ -997,7 +1153,14 @@
       var locked = state.failed[key];
       if (locked) {
         return Promise.resolve(
-          row(meta.module, meta.action, meta.activityId, 'blocked', 'locked-' + String(locked.status || 'failed'), baseExtra),
+          row(
+            meta.module,
+            meta.action,
+            meta.activityId,
+            'blocked',
+            'locked-' + String(locked.status || 'failed'),
+            lockedRowExtra(locked, baseExtra),
+          ),
         );
       }
       if (state.inflight[key]) {
@@ -1060,22 +1223,35 @@
           var verdict = classify(res);
           delete state.inflight[key];
           /**
-           * 可重试失败（meta.retryableFailed）：
-           * 签到码是**会滚动**的二维码，图库里那一张可能已经过期，服务端会拒绝。
-           * 这种「码不对」不是终态，不应永久锁死当天任务，否则换到新码也签不上。
-           * 重试次数由各自的 checks 计数器（qrChecks/photoChecks）收敛，
-           * 不会无限重试爆量；unknown（结果不确定）仍然锁死，避免重复提交。
+           * 失败原因落盘（脱敏、截断 200 字）：
+           * 学校端的 errmsg/errcode 必须留下来，否则用户事后完全不知道为什么失败。
+           * 只取明确的报错字段，不整包 JSON 落盘。
            */
+          var failureDetail = verdict === 'success' ? '' : upstreamFailureDetail(meta.module, res);
           if (verdict === 'success') {
             state.done[key] = now();
             if (meta.dailyKey) dailyAdd(state, meta.dailyKey);
-          } else if (verdict === 'failed' && meta.retryableFailed) {
-            // 不写 state.failed：下一 tick 允许用新码/新图重试
           } else if (verdict === 'failed') {
-            state.failed[key] = { status: 'failed', at: now() };
+            /**
+             * 有界重试：签到码/现场照片都会滚动过期，服务端拒绝一次不代表当天签不上。
+             * 只要调用方给了 attemptsSoFar/maxAttempts 且仍有余额，就不写 failed 终态，
+             * 下一 tick 继续（次数由调用方计数器收敛，不会无限重试爆量）。
+             */
+            if (failureDetail) {
+              state.lastFailure = state.lastFailure && typeof state.lastFailure === 'object' ? state.lastFailure : {};
+              state.lastFailure[key] = { detail: failureDetail, attempts: attemptNo, at: now() };
+            }
+            if (!canRetry) {
+              state.failed[key] = {
+                status: 'failed',
+                at: now(),
+                attempts: attemptNo,
+                lastError: failureDetail || '',
+              };
+            }
           } else {
-            // unknown：保留终态锁定，避免下一 tick 盲重试
-            state.failed[key] = { status: 'unknown', at: now() };
+            // unknown：结果不确定 → 保留终态锁定，避免下一 tick 盲重试造成重复提交
+            state.failed[key] = { status: 'unknown', at: now(), lastError: failureDetail || '' };
           }
           var persistFailed = false;
           try {
@@ -1084,7 +1260,12 @@
             persistFailed = true;
             logger.log('[storage] 结果落盘失败（内存态仍生效，需人工核查）：' + sanitizeError(e));
           }
-          logger.log('[' + meta.module + '] ' + meta.action + ' ' + String(meta.activityId) + ' → ' + verdict);
+          logger.log(
+            '[' + meta.module + '] ' + meta.action + ' ' + String(meta.activityId) + ' → ' + verdict
+              + (attemptNo > 0 && maxAttempts > 0 ? '（第 ' + attemptNo + '/' + maxAttempts + ' 次）' : '')
+              + (failureDetail ? ' 原因：' + failureDetail : '')
+              + (verdict === 'failed' && canRetry ? '（下轮继续重试）' : ''),
+          );
           var status = verdict;
           var reason = '';
           if (persistFailed) {
@@ -1093,12 +1274,18 @@
           } else if (verdict !== 'success') {
             reason = 'upstream-rejected';
           }
-          emitResult(meta, status, reason);
+          emitResult(meta, status, reason, failureDetail);
           // 合并 meta 中的安全诊断字段，便于日志定位
           var diagExtra = { key: key };
-          ['accountId', 'activityName', 'category', 'listStatus', 'classify', 'decision', 'scoreGate', 'applyWindowStart', 'applyWindowEnd', 'stage', 'distanceMeters', 'windowMinutes', 'runTime', 'signWay', 'photo', 'captchaFrom'].forEach(function (k) {
+          ['accountId', 'activityName', 'category', 'listStatus', 'classify', 'decision', 'scoreGate', 'applyWindowStart', 'applyWindowEnd', 'stage', 'distanceMeters', 'windowMinutes', 'runTime', 'signWay', 'photo', 'captchaFrom', 'coordSource'].forEach(function (k) {
             if (meta[k] !== undefined) diagExtra[k] = meta[k];
           });
+          if (failureDetail) diagExtra.detail = failureDetail;
+          if (attemptNo > 0) {
+            diagExtra.attempts = attemptNo;
+            if (maxAttempts > 0) diagExtra.maxAttempts = maxAttempts;
+            if (verdict === 'failed') diagExtra.retryable = canRetry;
+          }
           if (status === 'success') diagExtra.decision = 'applicable';
           return row(meta.module, meta.action, meta.activityId, status, reason, diagExtra);
         })
@@ -1122,7 +1309,7 @@
      * 只在**真实提交定论**后触发：dry-run / skipped / blocked / waiting 都不触发。
      * 行内绝不含 payload / token / 密码 / 完整手机号。
      */
-    function emitResult(meta, status, reason) {
+    function emitResult(meta, status, reason, detail) {
       if (typeof opts.onResult !== 'function') return;
       try {
         var event = {
@@ -1141,6 +1328,8 @@
         };
         if (meta.stage) event.stage = String(meta.stage);
         if (typeof meta.distanceMeters === 'number') event.distanceMeters = meta.distanceMeters;
+        // 上游拒绝原因（已脱敏、截断 200 字）：让历史里能看到「为什么失败」
+        if (detail) event.detail = String(detail);
         opts.onResult(event);
       } catch (e) {
         // 回调异常绝不影响业务结果
@@ -1701,12 +1890,26 @@
                     var startMs = parseClubMoment(base.startTime || taskItem.startTime, dateSources);
                     var endMs = parseClubMoment(base.endTime || taskItem.endTime, dateSources);
 
+                    /**
+                     * 坐标来源（顺序即安全口径）：
+                     *  1) currentSignTask 下发、且 activityId 与当前活动一致 → 用它（唯一可信来源）；
+                     *  2) 仅在 `club.allowActivityCoords=true` 时才允许用活动列表 latitude/longitude 兜底，
+                     *     并在结果行 detail 标注 'activity-coords'。
+                     * 默认关闭列表兜底：列表坐标可能是另一个校区（用户实测「报到龙泉校区」）。
+                     */
                     var coord = null;
+                    var coordSource = '';
                     if (currentTask && clubActivityId(currentTask) === id) {
-                      coord = { lat: currentTask.latitude, lng: currentTask.longitude };
-                    } else if (base.latitude != null && base.longitude != null && String(base.latitude) !== '') {
-                      coord = { lat: base.latitude, lng: base.longitude };
+                      coord = clubCoord(currentTask, currentTask.latitude, currentTask.longitude);
+                      if (coord) coordSource = 'sign-task';
                     }
+                    if (!coord && config.club.allowActivityCoords === true) {
+                      coord = clubCoord(base, base.latitude, base.longitude);
+                      if (coord) coordSource = 'activity-coords';
+                    }
+
+                    var signInWindowMs = clubWindowMinutes(config.club.signInWindowMinutes, CLUB_SIGNIN_WINDOW_MIN) * 60000;
+                    var signOutWindowMs = clubWindowMinutes(config.club.signOutWindowMinutes, CLUB_SIGNOUT_WINDOW_MIN) * 60000;
 
                     var officialIn = clubSignDone(base.signInStatus || taskItem.signInStatus);
                     var officialOut = clubSignDone(base.signBackStatus || taskItem.signBackStatus);
@@ -1718,10 +1921,10 @@
                         results.push(row('club', 'signIn', id, 'skipped', 'already-signed-in-upstream'));
                       } else {
                         inner.push(
-                          planClubSign(state, config, account, results, cred, id, 'signIn', '1', startMs, startMs + CLUB_SIGNIN_WINDOW_MIN * 60000, coord, activityNameOf(taskItem, base),
+                          planClubSign(state, config, account, results, cred, id, 'signIn', '1', startMs, startMs + signInWindowMs, coord, activityNameOf(taskItem, base),
                             function () {
                               return true; // 签到无前置依赖
-                            }),
+                            }, coordSource),
                         );
                       }
                     }
@@ -1735,12 +1938,13 @@
                         inner.push(
                           planClubSign(
                             state, config, account, results, cred, id, 'signOut', '2',
-                            endMs - CLUB_SIGNOUT_WINDOW_MIN * 60000, endMs, coord,
+                            endMs - signOutWindowMs, endMs, coord,
                             function () {
                               // 签退依赖：本地签到成功 或 官方已签到
                               return Boolean(state.done[inKey]) || officialIn;
                             },
                             activityNameOf(taskItem, base),
+                            coordSource,
                           ),
                         );
                       }
@@ -1768,7 +1972,26 @@
       return '';
     }
 
-    function planClubSign(state, config, account, results, cred, id, action, signType, windowStart, windowEnd, coord, canRun, activityName) {
+    /** 俱乐部窗口分钟数：非法/越界 → 默认值（0 或负数会把窗口压成无，24h 以上视为配错） */
+    function clubWindowMinutes(value, fallback) {
+      var n = numInRange(value, 1, 24 * 60);
+      return n === null ? fallback : n;
+    }
+
+    /** 俱乐部坐标取值：有效非零数字才认，否则 null（缺坐标就该等，不能拿 0/空串硬提交） */
+    function clubCoord(src, latRaw, lngRaw) {
+      if (!src) return null;
+      var lat = String(latRaw == null ? '' : latRaw).trim();
+      var lng = String(lngRaw == null ? '' : lngRaw).trim();
+      if (!lat || !lng) return null;
+      var latNum = Number(lat);
+      var lngNum = Number(lng);
+      if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+      if (latNum === 0 || lngNum === 0) return null;
+      return { lat: lat, lng: lng };
+    }
+
+    function planClubSign(state, config, account, results, cred, id, action, signType, windowStart, windowEnd, coord, canRun, activityName, coordSource) {
       var t = now();
       if (t < windowStart) {
         results.push(row('club', action, id, 'not-yet', 'before-window'));
@@ -1782,29 +2005,81 @@
         results.push(row('club', action, id, 'waiting-material', 'need-sign-in-first'));
         return Promise.resolve();
       }
+      var today = beijingDateString(t);
+      var key = dedupeKey({ date: today, account: account, module: 'club', activityId: id, action: action });
+      // 已锁定/已完成 → 先短路，不再消耗重试预算，也不再改写行状态
+      var settled = settledRow(state, 'club', action, id, key);
+      if (settled) {
+        results.push(settled);
+        return Promise.resolve();
+      }
+
       var lat = coord && String(coord.lat == null ? '' : coord.lat).trim();
       var lng = coord && String(coord.lng == null ? '' : coord.lng).trim();
       if (!lat || !lng || Number(lat) === 0 || Number(lng) === 0) {
-        results.push(row('club', action, id, 'waiting-material', 'need-coords'));
+        // 拿不到可信坐标就明确等（绝不用另一个校区的列表坐标硬提交）
+        results.push(row('club', action, id, 'waiting-material', 'need-coords', coordSource ? { coordSource: coordSource } : undefined));
         return Promise.resolve();
       }
-      var today = beijingDateString(t);
-      var key = dedupeKey({ date: today, account: account, module: 'club', activityId: id, action: action });
+
+      /**
+       * 有界重试：学校端拒绝一次不锁死当天任务（用户实测：一次被拒 → 整场没签上）。
+       * 次数/间隔可配（club.retryMaxAttempts / club.retryIntervalMinutes）；
+       * 结果不确定（unknown）仍由 perform 立即锁定，不重试。
+       * dry-run 只出预览行，**不消耗重试预算**（否则试跑几轮就把当天次数烧光）。
+       */
+      var retryMax = Math.max(1, Number(config.club.retryMaxAttempts) || 3);
+      var retryMs = Math.max(0, Number(config.club.retryIntervalMinutes) || 0) * 60000;
+      var attemptNo = 0;
+      if (!config.dryRun) {
+        state.clubChecks = state.clubChecks && typeof state.clubChecks === 'object' ? state.clubChecks : {};
+        var check = state.clubChecks[key] || { count: 0, lastAt: 0 };
+        if (check.count >= retryMax) {
+          results.push(
+            row('club', action, id, 'waiting-material', 'club-attempts-exhausted', { attempts: check.count, maxAttempts: retryMax }),
+          );
+          return Promise.resolve();
+        }
+        if (check.lastAt && retryMs > 0 && t < check.lastAt + retryMs) {
+          results.push(row('club', action, id, 'waiting-material', 'club-retry-pending', { attempts: check.count, maxAttempts: retryMax }));
+          return Promise.resolve();
+        }
+        check.count += 1;
+        check.lastAt = t;
+        state.clubChecks[key] = check;
+        try {
+          saveState(state);
+        } catch (e) {
+          logger.log('[storage] clubChecks 写入失败，已阻止提交：' + sanitizeError(e));
+          results.push(row('club', action, id, 'blocked', 'storage-error'));
+          return Promise.resolve();
+        }
+        attemptNo = check.count;
+      }
+
+      var extra = {};
+      if (coordSource) extra.coordSource = coordSource;
       return perform(
         state,
-        {
-          key: key,
-          module: 'club',
-          action: action,
-          activityId: id,
-          accountId: account,
-          activityName: String(activityName || ''),
-          category: '',
-          stage: action === 'signIn' ? 'sign-in' : 'sign-out',
-          config: config,
-          // 真正提交前的截止校验：过了签到/签退窗口就不再提交
-          deadlineMs: windowEnd,
-        },
+        Object.assign(
+          {
+            key: key,
+            module: 'club',
+            action: action,
+            activityId: id,
+            accountId: account,
+            activityName: String(activityName || ''),
+            category: '',
+            stage: action === 'signIn' ? 'sign-in' : 'sign-out',
+            config: config,
+            // 有界重试：本次是第几次尝试 / 上限（由 clubChecks 收敛）
+            attemptsSoFar: attemptNo,
+            maxAttempts: retryMax,
+            // 真正提交前的截止校验：过了签到/签退窗口就不再提交
+            deadlineMs: windowEnd,
+          },
+          extra,
+        ),
         function () {
           return api.club.signInOrSignBack({
             phone: cred.phone,
@@ -1819,6 +2094,8 @@
           return !res || typeof res !== 'object' ? 'unknown' : isClubSuccess(res) ? 'success' : 'failed';
         },
       ).then(function (r) {
+        // 坐标来自活动列表兜底时在结果行留痕（便于回溯「报到另一个校区」这类问题）
+        if (coordSource === 'activity-coords' && !r.detail) r.detail = 'activity-coords';
         results.push(r);
       });
     }
@@ -2431,7 +2708,16 @@
         return Promise.resolve();
       }
       if (state.failed[key]) {
-        results.push(row('ek', task.action, id, 'blocked', 'locked-' + String(state.failed[key].status || 'failed'), { key: key }));
+        results.push(
+          row(
+            'ek',
+            task.action,
+            id,
+            'blocked',
+            'locked-' + String(state.failed[key].status || 'failed'),
+            lockedRowExtra(state.failed[key], { key: key }),
+          ),
+        );
         return Promise.resolve();
       }
       if (range.start === null) {
@@ -2585,6 +2871,9 @@
                   category: String(task.category || ''),
                   stage: task.action === 'signIn' ? 'sign-in' : 'sign-out',
                   config: config,
+                  // 有界重试：与二维码路径共用 qrChecks 预算（本次是第几次尝试 / 上限）
+                  attemptsSoFar: check.count,
+                  maxAttempts: maxAttempts,
                   deadlineMs: range.end,
                   noQrFallback: true,
                 },
@@ -2634,6 +2923,9 @@
               category: String(task.category || ''),
               stage: task.action === 'signIn' ? 'sign-in' : 'sign-out',
               config: config,
+              // 有界重试：本次是第几次尝试 / 上限（由 qrChecks 收敛）
+              attemptsSoFar: check.count,
+              maxAttempts: maxAttempts,
               // 真正提交前的截止校验：过了官方窗口结束就不再提交
               deadlineMs: range.end,
             },
@@ -2699,6 +2991,25 @@
       var t = now();
       var maxAttempts = Math.max(1, Number(cfg.qrMaxAttempts) || 3);
       var retryMs = Math.max(0, Number(cfg.qrRetryMinutes) || 0) * 60000;
+      /**
+       * 延迟闸门（与二维码分支一致）：官方窗口开始后延迟 photoDelayMinutes 再提交。
+       * 未配置 photoDelayMinutes → 沿用 qrDelayMinutes（默认 2 分钟）；
+       * 显式 0 表示窗口一开始就提交。
+       */
+      var photoDelayRaw = cfg.photoDelayMinutes;
+      if (photoDelayRaw === undefined || photoDelayRaw === null || String(photoDelayRaw).trim() === '') {
+        photoDelayRaw = cfg.qrDelayMinutes;
+      }
+      var delayMin = Math.max(0, Number(photoDelayRaw) || 0);
+      var gateMs = range.start + delayMin * 60000;
+      if (gateMs > range.end) {
+        results.push(row('ek', task.action, id, 'waiting-material', 'photo-delay-exceeds-window', { signWay: signWay }));
+        gateMs = range.start + Math.min(delayMin * 60000, Math.max(0, range.end - range.start - 15000));
+      }
+      if (t < gateMs) {
+        results.push(row('ek', task.action, id, 'not-yet', 'before-photo-gate', { signWay: signWay }));
+        return Promise.resolve();
+      }
       var checksKey = dedupeKey({
         date: beijingDateString(now()),
         account: account,
@@ -2823,6 +3134,9 @@
               category: String(task.category || ''),
               stage: task.action === 'signIn' ? 'sign-in' : 'sign-out',
               config: config,
+              // 有界重试：本次是第几次尝试 / 上限（由 photoChecks 收敛）
+              attemptsSoFar: check.count,
+              maxAttempts: maxAttempts,
               deadlineMs: range.end,
               signWay: signWay,
               photo: photoUrl ? photoOrigin : 'none',
@@ -3185,6 +3499,8 @@
           daily: {},
           qrChecks: {},
           photoChecks: {},
+          clubChecks: {},
+          lastFailure: {},
           watchedEk: {},
           ekFinished: {},
           // 重置即清空当天随机窗口：下次运行会重新随机（符合「重置=回到初始」语义）
