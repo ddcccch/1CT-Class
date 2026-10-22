@@ -37,7 +37,7 @@ const FAILURE_JSON = path.join(ARTIFACTS, '1ct-shell-failure.json');
 const HARNESS_URL = '/harness/index.html';
 // 首次使用说明 / 本版更新公告的标记键（与 shell.js 保持一致）
 const ONBOARD_KEY = '1ct:onboard:v1';
-const WHATSNEW_KEY = '1ct:whatsnew:1.2.0';
+const WHATSNEW_KEY = '1ct:whatsnew:1.2.1';
 
 const EDGE_CANDIDATES = [
   process.env.EDGE_PATH,
@@ -1079,7 +1079,7 @@ const INJECTED = String.raw`
     // 默认预置「已经看过首次说明和本版更新」：后面的用例不会被弹层挡住；
     // 「首次进入弹引导 / 公告只弹一次」的用例会先清掉这两个标记再验证。
     window.localStorage.setItem('1ct:onboard:v1', String(t));
-    window.localStorage.setItem('1ct:whatsnew:1.2.0', String(t));
+    window.localStorage.setItem('1ct:whatsnew:1.2.1', String(t));
   }
 })();
 `;
@@ -1277,7 +1277,7 @@ async function main() {
       (await page.locator('[data-testid="one-ct-whatsnew-item"]').count()) === 5,
       String(await page.locator('[data-testid="one-ct-whatsnew-item"]').count()),
     );
-    check('更新公告写了扫码登录、19:00 和去掉预览', /微信扫码/.test(whatsnewText) && /19:00/.test(whatsnewText) && /去掉预览开关/.test(whatsnewText), whatsnewText.slice(0, 80));
+    check('更新公告写了自动重试、失败原因和俱乐部坐标', /重试/.test(whatsnewText) && /失败原因/.test(whatsnewText) && /俱乐部/.test(whatsnewText) && /微信扫码/.test(whatsnewText), whatsnewText.slice(0, 120));
     shots.push(await screenshot(page, '1ct-shell-00-whatsnew.png'));
     await page.getByTestId('one-ct-whatsnew-ok').click();
     await page.waitForTimeout(400);
@@ -3653,6 +3653,186 @@ async function main() {
     const afterHistory2 = await page.evaluate(() => window.OneCTShell.getLogs().length);
     check('刷新历史幂等（重复点击不翻倍）', afterHistory2 <= afterHistory1 + 2, `${beforeHistory}→${afterHistory1}→${afterHistory2}`);
 
+    // ── 6b) 失败原因展示（detail）+ 清除今日失败锁定 ──
+    // 复现用户截图现场：16:00 第一次签到被学校拒绝（failed），之后每轮被 locked-failed 拦住，
+    // 18:00 的 blocked 把历史里的原因冲掉了 —— 现在 failed 结论必须留得住。
+    const lockSeed = await page.evaluate(() => {
+      const pad = (n) => String(n).padStart(2, '0');
+      const dayOf = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      const today = dayOf(new Date());
+      const yesterday = dayOf(new Date(Date.now() - 86400000));
+      const now = Date.now();
+      const state = {
+        done: { [today + '|2024101164|ek|act-1|signIn']: now - 4 * 3600000 },
+        inflight: { [today + '|2024101164|ek|act-1|signOut']: now - 60 * 1000 },
+        failed: {
+          [today + '|2024101164|ek|act-2|signIn']: { status: 'failed', at: now - 3 * 3600000 },
+          [today + '|2024101164|unirun|daily|autoRun']: { status: 'unknown', at: now - 2 * 3600000 },
+          [yesterday + '|2024101164|ek|act-5|signIn']: { status: 'failed', at: now - 30 * 3600000 },
+        },
+        daily: {},
+        qrChecks: {},
+        watchedEk: {},
+      };
+      window.localStorage.setItem('1ct:state:m_zhangsan', JSON.stringify(state));
+      const raw = JSON.parse(window.localStorage.getItem('1ct:results') || '{}');
+      raw.events = Array.isArray(raw.events) ? raw.events : [];
+      raw.events.push({
+        key: 'detail|ek|signIn|act-detail|m_wangwu',
+        at: now - 1000,
+        day: today,
+        memberId: 'm_wangwu',
+        memberName: '王五',
+        module: 'ek',
+        action: 'signIn',
+        activityId: 'act-detail',
+        activityName: '志愿服务日',
+        status: 'failed',
+        reason: 'school-rejected',
+        detail: '学校返回：活动签到码已失效，请重新获取（errcode=40001）',
+        attempts: 2,
+        preview: false,
+        dryRun: false,
+      });
+      window.localStorage.setItem('1ct:results', JSON.stringify(raw));
+      return { today, yesterday };
+    });
+    await page.reload({ waitUntil: 'load' });
+    await waitReady(page);
+    await page.getByTestId('one-ct-tab-run').click();
+    await page.waitForTimeout(400);
+    check('运行页有「清除今日失败锁定」按钮', (await page.getByTestId('one-ct-clear-failed-lock').count()) === 1);
+    const lockBtnState = await page.evaluate(() => {
+      const btn = document.querySelector('[data-testid="one-ct-clear-failed-lock"]');
+      const hint = document.querySelector('[data-testid="one-ct-clear-failed-lock-hint"]');
+      return {
+        text: btn ? btn.textContent.trim() : '',
+        disabled: btn ? btn.disabled : null,
+        hint: hint ? hint.textContent.trim() : '',
+      };
+    });
+    check('按钮文案为「清除今日失败锁定」', lockBtnState.text === '清除今日失败锁定', JSON.stringify(lockBtnState));
+    check(
+      '今天有失败锁定时按钮可点，并提示项数',
+      lockBtnState.disabled === false && /2 项/.test(lockBtnState.hint),
+      JSON.stringify(lockBtnState),
+    );
+
+    // 二次确认：先取消 → 一条都不能清
+    await page.getByTestId('one-ct-clear-failed-lock').click();
+    await page.getByTestId('one-ct-clear-failed-modal').waitFor({ state: 'visible' });
+    check('点击后先弹二次确认（不直接清除）', await page.getByTestId('one-ct-clear-failed-modal').isVisible());
+    shots.push(await screenshot(page, '1ct-run-07-clear-failed-modal.png'));
+    await page.getByTestId('one-ct-clear-failed-modal-cancel-btn').click();
+    await page.waitForTimeout(300);
+    const afterCancel = await page.evaluate(() => {
+      const raw = JSON.parse(window.localStorage.getItem('1ct:state:m_zhangsan') || '{}');
+      return {
+        failedKeys: Object.keys(raw.failed || {}),
+        modals: document.querySelectorAll('[data-testid="one-ct-clear-failed-modal"]').length,
+      };
+    });
+    check(
+      '取消后一条都不清（失败锁定仍是 3 条）',
+      afterCancel.failedKeys.length === 3 && afterCancel.modals === 0,
+      JSON.stringify(afterCancel),
+    );
+
+    // 确认清除 → 今天两条消失，昨天与 done/inflight 留着
+    await page.getByTestId('one-ct-clear-failed-lock').click();
+    await page.getByTestId('one-ct-clear-failed-modal-confirm').click();
+    await page.waitForTimeout(500);
+    const afterClear = await page.evaluate(() => {
+      const raw = JSON.parse(window.localStorage.getItem('1ct:state:m_zhangsan') || '{}');
+      const btn = document.querySelector('[data-testid="one-ct-clear-failed-lock"]');
+      const hint = document.querySelector('[data-testid="one-ct-clear-failed-lock-hint"]');
+      return {
+        failedKeys: Object.keys(raw.failed || {}),
+        doneKeys: Object.keys(raw.done || {}),
+        inflightKeys: Object.keys(raw.inflight || {}),
+        logs: window.OneCTShell.getLogs().map((entry) => entry.text).join('\n'),
+        disabled: btn ? btn.disabled : null,
+        hint: hint ? hint.textContent.trim() : '',
+      };
+    });
+    check(
+      '清除后今天的两条失败锁定消失',
+      afterClear.failedKeys.length === 1 && afterClear.failedKeys[0].startsWith(lockSeed.today + '|') === false,
+      JSON.stringify(afterClear.failedKeys),
+    );
+    check(
+      '昨天的失败锁定保留',
+      afterClear.failedKeys.length === 1 && afterClear.failedKeys[0].startsWith(lockSeed.yesterday + '|'),
+      JSON.stringify(afterClear.failedKeys),
+    );
+    check(
+      'done / inflight 不受影响',
+      afterClear.doneKeys.length === 1 && afterClear.inflightKeys.length === 1,
+      JSON.stringify({ done: afterClear.doneKeys, inflight: afterClear.inflightKeys }),
+    );
+    check(
+      '清除后写一条中文日志「已清除今日失败锁定：2 项」',
+      /已清除今日失败锁定：2 项/.test(afterClear.logs),
+      afterClear.logs.slice(-120),
+    );
+    check(
+      '清完后按钮禁用并提示「今天没有失败的锁定」',
+      afterClear.disabled === true && /今天没有失败的锁定/.test(afterClear.hint),
+      JSON.stringify({ disabled: afterClear.disabled, hint: afterClear.hint }),
+    );
+
+    // 失败原因（detail）：记录页一行截断 + hover 全文
+    await page.getByTestId('one-ct-tab-records').click();
+    await page.waitForTimeout(400);
+    check('记录页有「失败记录」区块', (await page.getByTestId('one-ct-records-failed').count()) === 1);
+    const failedCell = await page.evaluate(() => {
+      const cell = document.querySelector('[data-testid="one-ct-records-failed-row"] .one-ct-detail-cell');
+      if (!cell) return null;
+      const style = getComputedStyle(cell);
+      return {
+        text: cell.textContent.trim(),
+        title: cell.getAttribute('title') || '',
+        overflow: style.textOverflow,
+        whiteSpace: style.whiteSpace,
+      };
+    });
+    check('记录页显示学校返回的失败原因', Boolean(failedCell) && /签到码已失效/.test(failedCell.text), JSON.stringify(failedCell));
+    check(
+      '失败原因 hover（title）能看全文',
+      Boolean(failedCell) && /errcode=40001/.test(failedCell.title),
+      JSON.stringify(failedCell && failedCell.title),
+    );
+    check(
+      '失败原因在单元格里一行截断（ellipsis）',
+      Boolean(failedCell) && failedCell.overflow === 'ellipsis' && failedCell.whiteSpace === 'nowrap',
+      JSON.stringify(failedCell),
+    );
+    shots.push(await screenshot(page, '1ct-records-02-failed.png'));
+
+    // 失败原因（detail）：日志页同样可见，且 hover 有全文、不泄露凭据
+    await page.getByTestId('one-ct-tab-logs').click();
+    await page.waitForTimeout(400);
+    const logDetail = await page.evaluate(() => {
+      const node = document.querySelector('[data-testid="one-ct-logs-view"] .one-ct-log-text[data-has-detail="1"]');
+      return node ? { text: node.textContent, title: node.getAttribute('title') || '' } : null;
+    });
+    check(
+      '日志页显示失败原因（学校返回：…）',
+      Boolean(logDetail) && /学校返回：/.test(logDetail.text),
+      JSON.stringify(logDetail && logDetail.text.slice(0, 100)),
+    );
+    check(
+      '日志行 hover title 是完整原因',
+      Boolean(logDetail) && /errcode=40001/.test(logDetail.title),
+      JSON.stringify(logDetail && logDetail.title),
+    );
+    const logsWithDetail = await page.getByTestId('one-ct-logs-view').textContent();
+    check(
+      '日志里的失败原因不含密码/token/JSESSIONID/完整手机号',
+      !/password=|JSESSIONID=|access_token|1[3-9]\d{9}/.test(logsWithDetail),
+      logsWithDetail.slice(0, 140),
+    );
+
     // ── 7) 持久化 / 重开恢复 ──
     await page.reload({ waitUntil: 'load' });
     await waitReady(page);
@@ -3890,5 +4070,6 @@ if (process.env.NODE_TEST_CONTEXT) {
     process.exitCode = 1;
   });
 }
+
 
 

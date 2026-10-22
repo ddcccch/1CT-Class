@@ -133,6 +133,88 @@ test('已 done 的 success 不会被 skipped 覆盖', () => {
   assert.equal(saved.status, 'success');
 });
 
+test('已 failed 的结论不会被后来的 blocked（locked-failed）覆盖，原因与首次失败时间保留', () => {
+  const { store } = makeStore();
+  store.append(
+    event({
+      key: 'fail-1',
+      status: 'failed',
+      reason: 'school-rejected',
+      detail: '学校返回：签到时间还没开始',
+      attempts: 2,
+    }),
+  );
+  // 之后每一轮都被 locked-failed 拦住
+  store.append(
+    event({
+      key: 'fail-1',
+      at: T0 + 2 * 60 * 60 * 1000,
+      status: 'blocked',
+      reason: 'locked-failed',
+      detail: '',
+    }),
+  );
+  const [saved] = store.list();
+  assert.equal(saved.status, 'failed', 'blocked 不能覆盖真实失败结论');
+  assert.equal(saved.reason, 'school-rejected');
+  assert.equal(saved.detail, '学校返回：签到时间还没开始');
+  assert.equal(saved.attempts, 2);
+  assert.equal(saved.at, T0, '首次失败时间不被 blocked 顶掉');
+  assert.equal(saved.lastSeenAt, T0 + 2 * 60 * 60 * 1000);
+  assert.equal(saved.seenCount, 2);
+});
+
+test('blocked 之后出现真实 failed 时允许升级（补上学校原因）', () => {
+  const { store } = makeStore();
+  store.append(event({ key: 'up-1', status: 'blocked', reason: 'locked-unknown', detail: '' }));
+  store.append(
+    event({
+      key: 'up-1',
+      at: T0 + 60 * 60 * 1000,
+      status: 'failed',
+      reason: 'school-rejected',
+      detail: '学校返回：验证码错误',
+    }),
+  );
+  const [saved] = store.list();
+  assert.equal(saved.status, 'failed');
+  assert.equal(saved.reason, 'school-rejected');
+  assert.equal(saved.detail, '学校返回：验证码错误');
+});
+
+test('success 仍最高优先：后来的 blocked/failed 都不降级', () => {
+  const { store } = makeStore();
+  store.append(event({ key: 's-1', status: 'success' }));
+  store.append(event({ key: 's-1', at: T0 + 60 * 60 * 1000, status: 'blocked', reason: 'locked-failed' }));
+  store.append(event({ key: 's-1', at: T0 + 2 * 60 * 60 * 1000, status: 'failed', reason: 'school-rejected' }));
+  const [saved] = store.list();
+  assert.equal(saved.status, 'success');
+  assert.equal(saved.at, T0);
+});
+
+test('detail/attempts：脱敏后落库、缺省容忍（旧调用方不传也不报错）', () => {
+  const { store, storage } = makeStore();
+  store.append(
+    event({
+      key: 'd-1',
+      status: 'failed',
+      reason: 'school-rejected',
+      detail: '签到失败 password=abc123 token:xyz JSESSIONID=AAA111 手机 13800000000',
+      attempts: 3.6,
+    }),
+  );
+  store.append(event({ key: 'd-2', status: 'failed', reason: 'school-rejected' }));
+  const detailEvent = store.list().find((item) => item.key === 'd-1');
+  const plain = store.list().find((item) => item.key === 'd-2');
+  assert.equal(/abc123|xyz|AAA111/.test(detailEvent.detail), false, '密码/token/JSESSIONID 不得落库');
+  assert.equal(detailEvent.detail.includes('13800000000'), false, '完整手机号不得落库');
+  assert.equal(/138\*\*\*\*0000/.test(detailEvent.detail), true);
+  assert.equal(detailEvent.attempts, 4, 'attempts 取整');
+  assert.equal('detail' in plain, false, '缺省 detail 不落字段');
+  assert.equal('attempts' in plain, false);
+  assert.equal(storage.get(Results.KEY).includes('abc123'), false);
+});
+
 test('preview/dry-run 轮次不落库、不计成功', () => {
   const { store } = makeStore();
   assert.equal(store.recordRound({ dryRun: true, results: [event({ key: 'p-1' })] }).recorded, 0);

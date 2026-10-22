@@ -6,6 +6,9 @@
  *  - 成功 = 上游已接受 action（status === 'success'）；提交成功 ≠ 官方入账，本仓库不计算分数；
  *  - 同 key upsert：重复成功不覆盖，更丰富的 activityName/distance/stage 会合并保留；
  *    已 done 的 success 不会被 skipped/legacy 覆盖；每 tick 重复写同 key 不会刷爆；
+ *    合并优先级 success > failed/unknown > skipped/blocked/not-yet/waiting：
+ *    后来的 blocked（locked-failed）不得覆盖已经记录的 failed/unknown 结论，
+ *    status/reason/detail 与首次失败时间保留，只累计 lastSeenAt/seenCount；
  *  - 有界：最多 2000 条、至少保留最近 90 天；统计只按保留窗口内数据；
  *  - 不存 payload / token / 密码 / cookie / 完整手机号；手机号账号自动掩码；
  *  - 账号隔离：事件带 accountId（ek 与 tanma 历史分开筛选，不会混成空）；
@@ -66,14 +69,50 @@
     'category',
     'status',
     'reason',
+    // 学校返回的失败原因（脱敏后的人类可读文本；缺省容忍）
+    'detail',
     'stage',
     'distanceMeters',
     'attempt',
+    // 引擎附带的尝试次数（可能缺省）
+    'attempts',
+    // 同 key 再次被拦下时只更新这两个字段，结论（status/reason/detail）保持不动
+    'lastSeenAt',
+    'seenCount',
     'preview',
     'dryRun',
     'legacy',
     'source',
   ];
+
+  /** 合并优先级：success > failed/unknown > 其它（skipped/blocked/not-yet/waiting/legacy）。 */
+  var STATUS_RANK = { success: 3, failed: 2, unknown: 2 };
+
+  function statusRank(status) {
+    return STATUS_RANK[text(status).toLowerCase()] || 1;
+  }
+
+  var DETAIL_MAX_LEN = 200;
+  var DETAIL_SECRET_RE = /(password|passwd|access_token|refresh_token|jsessionid|token|secret|cookie)\s*[:=]\s*[^\s,;]+/gi;
+  var PHONE_IN_TEXT_RE = /\b1[3-9]\d{9}\b/g;
+
+  /**
+   * 学校返回的 errmsg（detail）：允许人类可读自由文本，但落库前必须脱敏。
+   * 引擎侧已脱敏；存储是最后一道防线，这里再抹一遍密码/token/JSESSIONID/完整手机号。
+   */
+  function sanitizeDetail(raw) {
+    var value = text(raw, 600);
+    if (!value) return '';
+    value = value.replace(DETAIL_SECRET_RE, function (matched) {
+      return matched.split(/[:=]/)[0] + '=***';
+    });
+    value = value.replace(PHONE_IN_TEXT_RE, function (phone) {
+      return maskPhone(phone);
+    });
+    value = value.replace(/\s+/g, ' ').trim();
+    if (value.length > DETAIL_MAX_LEN) value = value.slice(0, DETAIL_MAX_LEN) + '…';
+    return value;
+  }
 
   function text(value, maxLen) {
     if (value === null || value === undefined) return '';
@@ -222,9 +261,13 @@
       category: text(raw.category),
       status: statusValue,
       reason: sanitizeReason(raw.reason),
+      detail: sanitizeDetail(raw.detail === undefined ? base.detail : raw.detail),
       stage: text(raw.stage),
       distanceMeters: finiteNumberOrNull(raw.distanceMeters),
       attempt: finiteNumberOrNull(raw.attempt),
+      attempts: finiteNumberOrNull(raw.attempts === undefined ? base.attempts : raw.attempts),
+      lastSeenAt: finiteNumberOrNull(raw.lastSeenAt),
+      seenCount: finiteNumberOrNull(raw.seenCount),
       preview: false,
       dryRun: false,
       legacy: raw.legacy === true,
@@ -232,6 +275,7 @@
     };
     if (!event.day) event.day = beijingDay(event.at);
     if (event.attempt !== null) event.attempt = Math.max(0, Math.round(event.attempt));
+    if (event.attempts !== null) event.attempts = Math.max(0, Math.round(event.attempts));
     if (event.distanceMeters !== null && event.distanceMeters < 0) event.distanceMeters = null;
     if (event.legacy) {
       // 旧记录只保留动作身份，不伪造明细
@@ -258,7 +302,14 @@
     return out;
   }
 
-  /** 合并 upsert：保留已有信息，新信息更丰富时覆盖；success 不被 skipped/legacy 降级。 */
+  /**
+   * 合并 upsert：保留已有信息，新信息更丰富时覆盖。
+   * 优先级 success > failed/unknown > skipped/blocked/not-yet/waiting（与 members.js 同口径）：
+   *  - 已 success 不被 skipped/legacy/failed 降级；
+   *  - 已 failed/unknown 是真实失败结论：后来每轮写下的 blocked（locked-failed）不得
+   *    覆盖 status/reason/detail，首次失败时间保留，只累计 lastSeenAt 与次数；
+   *  - blocked → failed 允许升级（补上真实原因）。
+   */
   function mergeEvent(existing, incoming) {
     var merged = {};
     var i;
@@ -295,6 +346,35 @@
       if (incoming.legacy) merged.legacy = false;
       return sanitize(merged);
     }
+    if (!incomingSuccess && statusRank(existing.status) > statusRank(incoming.status)) {
+      // 已有 failed/unknown：只记「最后一次被拦下」的时间与次数，结论原样保留
+      merged.status = existing.status;
+      if (existing.reason) merged.reason = existing.reason;
+      if (existing.detail) merged.detail = existing.detail;
+      if (existing.attempts !== undefined) merged.attempts = existing.attempts;
+      var seenAt = finiteNumberOrNull(incoming.at);
+      var lastSeenAt = finiteNumberOrNull(existing.lastSeenAt);
+      if (seenAt !== null) {
+        merged.lastSeenAt = lastSeenAt === null ? seenAt : Math.max(lastSeenAt, seenAt);
+        merged.seenCount = (finiteNumberOrNull(existing.seenCount) || 1) + 1;
+      }
+      if ((merged.activityName === undefined || merged.activityName === '') && incoming.activityName) {
+        merged.activityName = incoming.activityName;
+      }
+      if ((merged.activityId === undefined || merged.activityId === '') && incoming.activityId) {
+        merged.activityId = incoming.activityId;
+      }
+      if ((merged.category === undefined || merged.category === '') && incoming.category) {
+        merged.category = incoming.category;
+      }
+      if ((merged.stage === undefined || merged.stage === '') && incoming.stage) {
+        merged.stage = incoming.stage;
+      }
+      if (merged.distanceMeters === undefined && incoming.distanceMeters !== null && incoming.distanceMeters !== undefined) {
+        merged.distanceMeters = incoming.distanceMeters;
+      }
+      return sanitize(merged);
+    }
     for (i = 0; i < ALLOWED_FIELDS.length; i += 1) {
       var name = ALLOWED_FIELDS[i];
       var next = incoming[name];
@@ -306,11 +386,15 @@
       }
       if (name === 'at') {
         merged.at = Math.max(Number(prev) || 0, Number(next) || 0);
-      } else if (name === 'distanceMeters' || name === 'attempt') {
+      } else if (name === 'distanceMeters' || name === 'attempt' || name === 'attempts') {
         merged[name] = next;
+      } else if (name === 'lastSeenAt') {
+        merged.lastSeenAt = Math.max(Number(prev) || 0, Number(next) || 0);
+      } else if (name === 'seenCount') {
+        merged.seenCount = Math.max(Number(prev) || 1, Number(next) || 1);
       } else if (name === 'status') {
         merged.status = existingSuccess ? 'success' : next;
-      } else if (name === 'activityName' || name === 'stage' || name === 'reason') {
+      } else if (name === 'activityName' || name === 'stage' || name === 'reason' || name === 'detail') {
         merged[name] = next; // 更新更丰富/更新鲜的信息
       } else if (name === 'legacy') {
         merged.legacy = Boolean(prev) && Boolean(next);
@@ -490,9 +574,12 @@
           category: row.category,
           status: row.status,
           reason: row.reason,
+          detail: row.detail,
           stage: row.stage,
           distanceMeters: row.distanceMeters,
           attempt: row.attempt,
+          attempts: row.attempts,
+          lastSeenAt: row.lastSeenAt,
           source: row.source,
         });
         if (!ok) {

@@ -1055,6 +1055,210 @@ test('appendResult：成功不被 skipped 降级；reason 不落自由文本', (
   assert.equal(JSON.stringify(events).includes('13800000000'), false);
 });
 
+// ───────────────────── 历史合并优先级（failed 不被 blocked 覆盖） ─────────────────────
+
+const MERGE_KEY = '2026-10-17|20230001|ek|act-1|signIn';
+
+function mergeRow(overrides = {}) {
+  return Object.assign(
+    {
+      key: MERGE_KEY,
+      at: T0,
+      accountId: '20230001',
+      module: 'ek',
+      action: 'signIn',
+      activityId: 'act-1',
+      activityName: '示例讲座',
+      memberId: 'm_1',
+      memberName: '张三',
+      status: 'failed',
+      reason: 'school-rejected',
+      detail: '学校返回：签到时间还没开始',
+    },
+    overrides,
+  );
+}
+
+test('历史合并：failed 不被后来的 blocked（locked-failed）覆盖，原因与首次失败时间都保留', () => {
+  const { members } = makeMembers();
+  members.appendResult(mergeRow({ attempts: 2 }));
+  // 之后每一轮都被 locked-failed 拦住：同一 key 又被写成 blocked
+  members.appendResult(mergeRow({ at: T0 + 2 * 3600000, status: 'blocked', reason: 'locked-failed', detail: '' }));
+  const [event] = members.loadResults();
+  assert.equal(event.status, 'failed', 'blocked 不能覆盖真实失败结论');
+  assert.equal(event.reason, 'school-rejected');
+  assert.equal(event.detail, '学校返回：签到时间还没开始');
+  assert.equal(event.attempts, 2);
+  assert.equal(event.at, T0, '首次失败时间不能被后来的 blocked 时间顶掉');
+  assert.equal(event.lastSeenAt, T0 + 2 * 3600000, '最后一次被拦下的时间记在 lastSeenAt');
+  assert.equal(event.seenCount, 2);
+});
+
+test('历史合并：blocked 之后出现真实 failed 时允许升级并补上学校原因', () => {
+  const { members } = makeMembers();
+  members.appendResult(mergeRow({ status: 'blocked', reason: 'locked-unknown', detail: '' }));
+  members.appendResult(
+    mergeRow({
+      at: T0 + 3600000,
+      status: 'failed',
+      reason: 'school-rejected',
+      detail: '学校返回：验证码错误',
+    }),
+  );
+  const [event] = members.loadResults();
+  assert.equal(event.status, 'failed', '后来的真实失败必须能升级 blocked');
+  assert.equal(event.reason, 'school-rejected');
+  assert.equal(event.detail, '学校返回：验证码错误');
+});
+
+test('历史合并：success 仍是最高优先级（blocked/failed 都不降级）', () => {
+  const { members } = makeMembers();
+  members.appendResult(mergeRow({ status: 'success', reason: '', detail: '' }));
+  members.appendResult(mergeRow({ at: T0 + 3600000, status: 'blocked', reason: 'locked-failed', detail: '学校返回：x' }));
+  members.appendResult(mergeRow({ at: T0 + 7200000, status: 'failed', reason: 'school-rejected', detail: '学校返回：y' }));
+  const events = members.loadResults();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].status, 'success');
+  assert.equal(events[0].at, T0);
+  assert.equal(events[0].reason || '', '', '成功结论不被后来的失败原因污染');
+  assert.equal(events[0].detail || '', '');
+});
+
+test('结果行 detail：密码/token/JSESSIONID/完整手机号都打码，超长截断成一行', () => {
+  const { members, storage } = makeMembers();
+  members.appendResult(
+    mergeRow({
+      key: 'k-detail',
+      detail:
+        '签到失败 password=abc123 token:xyz-token JSESSIONID=AAA111 手机 13800000000 ' + 'x'.repeat(400),
+    }),
+  );
+  const [event] = members.loadResults();
+  assert.equal(/abc123/.test(event.detail), false, '密码不得落库');
+  assert.equal(/xyz-token/.test(event.detail), false, 'token 不得落库');
+  assert.equal(/AAA111/.test(event.detail), false, 'JSESSIONID 不得落库');
+  assert.equal(event.detail.includes('13800000000'), false, '完整手机号不得落库');
+  assert.equal(/138\*\*\*\*0000/.test(event.detail), true, '手机号按现有口径掩码');
+  assert.equal(event.detail.length <= 201, true, 'detail 截断为一行短文本');
+  assert.equal(/\n/.test(event.detail), false);
+  assert.equal(storage.raw('1ct:results').includes('abc123'), false);
+});
+
+test('结果行 detail/attempts 缺省容错：没有就不写字段，不做 NaN', () => {
+  const { members } = makeMembers();
+  members.appendResult(
+    mergeRow({ key: 'k-no-detail', detail: undefined, attempts: undefined }),
+  );
+  members.appendResult(
+    mergeRow({ key: 'k-attempts', at: T0 + 1000, attempts: 3.6, detail: '' }),
+  );
+  const events = members.loadResults();
+  const plain = events.find((event) => event.key === 'k-no-detail');
+  const withAttempts = events.find((event) => event.key === 'k-attempts');
+  assert.equal('detail' in plain, false);
+  assert.equal('attempts' in plain, false);
+  assert.equal(withAttempts.attempts, 4, 'attempts 取整');
+  assert.equal('detail' in withAttempts, false, '空 detail 不落字段');
+});
+
+// ───────────────────────── 清除今日失败锁定 ─────────────────────────
+
+/** 预置引擎 state：今天两条失败 + 一条 unknown、昨天一条失败、一条 done、一条 inflight。 */
+function seedFailedLocks(storage, memberId, opts = {}) {
+  const today = opts.today || '2026-10-17';
+  const yesterday = opts.yesterday || '2026-10-16';
+  const data = {
+    done: {},
+    inflight: {},
+    failed: {},
+    daily: {},
+  };
+  data.done[today + '|20230001|ek|act-done|signIn'] = T0 - 5 * 3600000;
+  data.inflight[today + '|20230001|ek|act-flight|signOut'] = T0 - 60 * 1000;
+  data.failed[today + '|20230001|ek|act-1|signIn'] = { status: 'failed', at: T0 - 3 * 3600000 };
+  data.failed[today + '|20230001|unirun|daily|autoRun'] = { status: 'unknown', at: T0 - 2 * 3600000 };
+  data.failed[yesterday + '|20230001|ek|act-old|signIn'] = { status: 'failed', at: T0 - DAY_MS };
+  storage.set('1ct:state:' + memberId, JSON.stringify(data));
+  return data;
+}
+
+function readState(storage, memberId) {
+  return JSON.parse(storage.raw('1ct:state:' + memberId));
+}
+
+test('clearFailedLocks：只删今天的失败锁定，昨天与 done/inflight 不动', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  const before = seedFailedLocks(storage, member.id);
+  storage.set('1ct:results', JSON.stringify({ version: 1, events: [{ key: 'keep-me', at: T0, status: 'success' }] }));
+
+  const result = members.clearFailedLocks();
+  assert.equal(result.cleared, 2, '今天两条（failed + unknown）被清掉');
+  assert.equal(result.today, '2026-10-17');
+
+  const after = readState(storage, member.id);
+  assert.deepEqual(Object.keys(after.failed), ['2026-10-16|20230001|ek|act-old|signIn']);
+  assert.deepEqual(after.done, before.done, 'done 不受影响');
+  assert.deepEqual(after.inflight, before.inflight, 'inflight 不受影响');
+  assert.equal(
+    storage.raw('1ct:results').includes('keep-me'),
+    true,
+    '结果历史不动',
+  );
+  assert.equal(result.members[0].memberId, member.id);
+  assert.equal(result.members[0].cleared, 2);
+});
+
+test('clearFailedLocks dryRun：只统计不落盘（UI 用它判断按钮能不能点）', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  const before = seedFailedLocks(storage, member.id);
+  const result = members.clearFailedLocks({ dryRun: true });
+  assert.equal(result.cleared, 2);
+  assert.equal(result.dryRun, true);
+  assert.deepEqual(readState(storage, member.id).failed, before.failed, 'dryRun 不得改存储');
+});
+
+test('clearFailedLocks：今天没有失败锁定 → 返回 0 且不改存储', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  const onlyOld = {
+    done: {},
+    inflight: {},
+    failed: { '2026-10-16|20230001|ek|act-old|signIn': { status: 'failed', at: T0 - DAY_MS } },
+  };
+  storage.set('1ct:state:' + member.id, JSON.stringify(onlyOld));
+  const result = members.clearFailedLocks();
+  assert.equal(result.cleared, 0);
+  assert.deepEqual(result.members, []);
+  assert.deepEqual(readState(storage, member.id), onlyOld);
+});
+
+test('clearFailedLocks：默认只处理启用成员，可指定 memberId 覆盖', () => {
+  const { members, storage } = makeMembers();
+  const enabledMember = addMember(members, { name: '张三', enabled: true });
+  const disabledMember = addMember(members, { name: '李四', enabled: false });
+  seedFailedLocks(storage, enabledMember.id);
+  seedFailedLocks(storage, disabledMember.id);
+
+  const result = members.clearFailedLocks();
+  assert.equal(result.cleared, 2, '只清启用成员');
+  assert.equal(Object.keys(readState(storage, disabledMember.id).failed).length, 3, '停用成员不动');
+
+  const forced = members.clearFailedLocks({ memberId: disabledMember.id });
+  assert.equal(forced.cleared, 2, '显式指定成员时即使停用也处理');
+  assert.equal(Object.keys(readState(storage, disabledMember.id).failed).length, 1);
+});
+
+test('clearFailedLocks：state 缺失或损坏时安全跳过（不抛错、不覆盖）', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  storage.set('1ct:state:' + member.id, '{ not-json');
+  const result = members.clearFailedLocks();
+  assert.equal(result.cleared, 0);
+  assert.equal(storage.raw('1ct:state:' + member.id), '{ not-json', '损坏的 state 不静默覆盖');
+});
+
 test('结果历史有界：超出 2000 条时裁掉最旧', () => {
   const storage = memoryStorage();
   const clock = makeClock(T0);

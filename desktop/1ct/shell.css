@@ -1603,6 +1603,26 @@ body {
   border-radius: var(--radius-sm);
   background: var(--bg-subtle);
 }
+
+/* 失败原因单元格：一行内截断，鼠标悬停看全文（title 里是完整文本） */
+.one-ct-detail-cell {
+  display: inline-block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  color: var(--text-2);
+}
+
+.one-ct-detail-cell[data-has-detail='1'] {
+  color: var(--err);
+}
+
+.one-ct-log-text[data-has-detail='1'] {
+  cursor: help;
+}
+
 /* ---------- 首次使用说明 / 本版更新 ---------- */
 .one-ct-modal--notice {
   width: min(560px, 100%);

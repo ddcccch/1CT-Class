@@ -2,14 +2,14 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.2.0';
+  var APP_VERSION = '1.2.1';
   // 本版更新公告（按版本只弹一次，用户可见文案）
   var CHANGELOG = [
-    '去掉预览开关，启动即真实执行（更省心）',
-    '新增微信扫码登录：不在校园网也能登录二课',
-    '新增首次使用说明，第一次打开会把三步讲清楚',
-    '校园跑每日执行时刻默认改为 19:00，可在「运行」页随时调整',
-    '界面与提示文案重新整理，登录失败时会直接显示具体原因',
+    '签到失败会自动重试（默认每 2 分钟一次、最多 3 次），不再一次被拒就锁死一整天',
+    '失败原因会写在日志和记录里，能直接看到学校返回的说明',
+    '新增「清除今日失败锁定」，想立刻再试一次时不用等明天',
+    '俱乐部签到窗口放宽到 15 分钟（可配置），坐标只回传学校下发的签到点，避免记到别的校区',
+    '去掉预览开关，启动即真实执行；微信扫码登录、首次引导继续保留',
   ];
 
   var UI_KEY = '1ct:ui';
@@ -563,6 +563,8 @@
       text: text(message).slice(0, 400),
       memberId: meta && meta.memberId ? String(meta.memberId) : '',
       memberName: meta && meta.memberName ? String(meta.memberName) : '',
+      // 学校返回的失败原因全量文本（行内截断显示，hover 用 title 看全文）
+      detail: meta && meta.detail ? text(meta.detail).slice(0, 400) : '',
     });
     if (logs.length > MAX_LOG) logs = logs.slice(-MAX_LOG);
     scheduleLogsRender();
@@ -585,6 +587,20 @@
     return REASON_CN[code] ? REASON_CN[code] + '(' + code + ')' : code;
   }
 
+  /** 结果行里学校返回的原因（detail）全量文本；缺省返回空串（引擎/旧记录可能没有）。 */
+  function rowDetail(row) {
+    if (!isObject(row)) return '';
+    return text(row.detail).replace(/\s+/g, ' ').trim();
+  }
+
+  /** detail 的一行显示版本（超长截断，hover 用 rowDetail 看全文）。 */
+  function detailShort(value, maxLen) {
+    var detail = text(value).replace(/\s+/g, ' ').trim();
+    if (!detail) return '';
+    var limit = num(maxLen, 0) > 0 ? num(maxLen, 60) : 60;
+    return detail.length > limit ? detail.slice(0, limit) + '…' : detail;
+  }
+
   function rowText(row) {
     var module = MODULE_CN[row.module] || trim(row.module) || '未知';
     var action = ACTION_CN[row.action] || trim(row.action) || '';
@@ -597,6 +613,9 @@
     parts.push(status);
     var reason = reasonCn(row.reason);
     if (reason) parts.push(reason);
+    // 学校返回的失败原因：一行内截断（全量在 hover 的 title 里）
+    var detail = detailShort(rowDetail(row));
+    if (detail) parts.push('学校返回：' + detail);
     return parts.join('｜');
   }
 
@@ -625,6 +644,7 @@
         text: rowText(event),
         memberId: text(event.memberId),
         memberName: text(event.memberName),
+        detail: text(event.detail),
       };
       var key = entry.at + '|' + entry.kind + '|' + entry.text + '|' + entry.memberId;
       if (seen[key]) return;
@@ -850,6 +870,18 @@
     if (count) count.textContent = String(enabledMembers().length);
     var once = els.runView.querySelector('[data-testid="one-ct-run-once"]');
     if (once) once.disabled = runtime.busy;
+    // 每轮跑完可能新增/清掉锁定：同步按钮可用状态与提示
+    var clearBtn = els.runView.querySelector('[data-testid="one-ct-clear-failed-lock"]');
+    if (clearBtn) {
+      var lockInfo = todayFailedLocks();
+      clearBtn.disabled = !lockInfo.available || lockInfo.count === 0;
+      var lockHint = els.runView.querySelector('[data-testid="one-ct-clear-failed-lock-hint"]');
+      if (lockHint) {
+        lockHint.textContent = lockInfo.count
+          ? '今天有 ' + lockInfo.count + ' 项失败被锁定，清掉后下一轮会重新尝试'
+          : '今天没有失败的锁定';
+      }
+    }
   }
 
   function nextIntervalMs() {
@@ -879,6 +911,7 @@
     pushLog(eventKind(row), rowText(row), {
       memberId: memberId,
       memberName: text(row.memberName) || (member ? text(member.name) : ''),
+      detail: rowDetail(row),
     });
   }
 
@@ -995,6 +1028,71 @@
     saveUi({ running: false });
     pushLog('info', '已停止（已发出的请求仍会完成并记录真实结果）');
     renderStatus();
+  }
+
+  // ─────────────────── 清除今日失败锁定（被学校拒绝后不再死锁） ───────────────────
+
+  /** 今天还有多少项失败锁定（只读，不动存储）：用于按钮禁用判断与提示文案。 */
+  function todayFailedLocks() {
+    if (!hasFn(M, 'clearFailedLocks')) return { count: 0, available: false, members: [] };
+    try {
+      var result = M.clearFailedLocks({ dryRun: true });
+      return {
+        count: num(result && result.cleared, 0) || 0,
+        available: true,
+        members: (result && result.members) || [],
+      };
+    } catch (e) {
+      return { count: 0, available: false, members: [] };
+    }
+  }
+
+  /** 二次确认：清掉今天被学校拒绝的锁定，下一轮会重新尝试。 */
+  function confirmClearFailedLocks() {
+    var info = todayFailedLocks();
+    if (!info.available) {
+      pushLog('error', '清除失败锁定用不了：本机数据服务不可用，请重启软件再试');
+      return;
+    }
+    if (!info.count) {
+      pushLog('info', '今天没有失败的锁定');
+      return;
+    }
+    openConfirmModal({
+      testid: 'one-ct-clear-failed-modal',
+      title: '清除今天的失败锁定？',
+      sub: '给被学校拒绝过的任务一次重试机会',
+      body: [
+        h('div', { class: 'one-ct-hint' }, [
+          '今天有 ' + info.count + ' 项任务因为失败被锁定，清掉之后下一轮会重新尝试。',
+        ]),
+        h('div', { class: 'one-ct-hint' }, [
+          '只清今天的失败锁定：已成功的、正在执行的、以及昨天的记录都不会动；执行记录里原来的失败原因也会保留。',
+        ]),
+      ],
+      confirmText: '确认清除',
+      onConfirm: function () {
+        doClearFailedLocks();
+      },
+    });
+  }
+
+  /** 真正执行清除：只删 1ct:state:<memberId>.failed 里今天（北京日）的键。 */
+  function doClearFailedLocks() {
+    if (!hasFn(M, 'clearFailedLocks')) {
+      pushLog('error', '清除失败锁定用不了：本机数据服务不可用，请重启软件再试');
+      return;
+    }
+    var cleared = 0;
+    try {
+      var result = M.clearFailedLocks();
+      cleared = num(result && result.cleared, 0) || 0;
+    } catch (e) {
+      pushLog('error', '清除失败锁定失败：' + sanitizeError(e));
+      return;
+    }
+    pushLog('info', '已清除今日失败锁定：' + cleared + ' 项');
+    if (ui.tab === 'run') renderView();
   }
 
   function toggleRun() {
@@ -1453,13 +1551,28 @@
         runRound(true);
       },
     });
+    // 被学校拒绝后引擎会锁定当天任务：这里给一个明确的「重来一次」出口
+    var failedLock = todayFailedLocks();
+    var clearFailedBtn = h('button', {
+      class: 'one-ct-btn',
+      type: 'button',
+      text: '清除今日失败锁定',
+      'data-testid': 'one-ct-clear-failed-lock',
+      title: failedLock.count
+        ? '清掉今天被学校拒绝的锁定，下一轮会重新尝试；已成功和昨天的记录不动'
+        : '今天没有失败的锁定',
+      disabled: !failedLock.available || failedLock.count === 0,
+      onclick: function () {
+        confirmClearFailedLocks();
+      },
+    });
     var statusCard = h('section', { class: 'one-ct-card', 'data-testid': 'one-ct-run-status' }, [
       h('div', { class: 'one-ct-card-head' }, [
         h('div', { class: 'one-ct-card-head-main' }, [
           h('div', { class: 'one-ct-card-title', text: '自动运行' }),
           h('div', { class: 'one-ct-card-sub', text: '按成员一个一个跑，到点自动执行；启动后就是真实提交' }),
         ]),
-        h('div', { class: 'one-ct-card-head-actions' }, [startBtn, runOnceBtn]),
+        h('div', { class: 'one-ct-card-head-actions' }, [startBtn, runOnceBtn, clearFailedBtn]),
       ]),
       h('div', { class: 'one-ct-card-body' }, [
         h('div', { class: 'one-ct-row' }, [
@@ -1472,6 +1585,11 @@
                 ? '已启用：按间隔自动执行'
                 : '未启动',
           }),
+        ]),
+        h('div', { class: 'one-ct-hint', 'data-testid': 'one-ct-clear-failed-lock-hint' }, [
+          failedLock.count
+            ? '今天有 ' + failedLock.count + ' 项失败被锁定，清掉后下一轮会重新尝试'
+            : '今天没有失败的锁定',
         ]),
         h('div', {
           class: 'one-ct-hint',
@@ -5300,6 +5418,19 @@
       });
     }
 
+    /** 失败记录：任何模块的 failed/unknown（带学校返回原因），最新在前。 */
+    function failuresOf() {
+      var all = loadResultEvents();
+      if (!Array.isArray(all)) return [];
+      return all
+        .filter(function (ev) {
+          if (!isObject(ev)) return false;
+          if (filter.memberId && String(ev.memberId || '') !== filter.memberId) return false;
+          return ev.status === 'failed' || ev.status === 'unknown';
+        })
+        .sort(function (a, b) { return num(b.at, 0) - num(a.at, 0); });
+    }
+
     function actionsOf(list, names) {
       return list.filter(function (ev) {
         var a = text(ev.action).toLowerCase().replace(/[_-]/g, '');
@@ -5367,7 +5498,29 @@
           ]);
         });
 
-      if (!clubRows.length && !runRows.length) {
+      // 失败记录：学校返回的原因（detail）一行截断，hover 看全文；没有 detail 时退回固定原因码
+      var failedEvents = failuresOf();
+      var failedRows = failedEvents.slice(0, 50).map(function (ev) {
+        var detail = rowDetail(ev);
+        var reasonText = detail || reasonCn(ev.reason) || '—';
+        var actionText =
+          (MODULE_CN[ev.module] || trim(ev.module) || '未知') + (ACTION_CN[ev.action] || trim(ev.action) || '');
+        return h('tr', { 'data-testid': 'one-ct-records-failed-row' }, [
+          h('td', { class: 'one-ct-muted' }, [h('span', { class: 'one-ct-num', text: formatDateTime(ev.at) })]),
+          h('td', null, [h('span', { text: text(ev.memberName) || text(ev.accountId) || '—' })]),
+          h('td', null, [h('span', { text: actionText })]),
+          h('td', null, [
+            h('span', {
+              class: 'one-ct-detail-cell',
+              title: reasonText,
+              'data-has-detail': detail ? '1' : '',
+              text: detailShort(reasonText, 48),
+            }),
+          ]),
+        ]);
+      });
+
+      if (!clubRows.length && !runRows.length && !failedRows.length) {
         host.appendChild(h('div', { class: 'one-ct-empty', 'data-testid': 'one-ct-records-empty' }, [
           h('div', { class: 'one-ct-empty-title', text: '还没有执行记录' }),
           h('div', { text: '到「运行」页启动一次，跑成功的报名和跑步都会出现在这里。' }),
@@ -5408,6 +5561,20 @@
           ? rowsTable(runRows, ['时间', '成员', '里程 / 时长', '状态'])
           : h('div', { class: 'one-ct-empty', text: '校园跑还没有成功记录' }),
       ]));
+
+      // 失败记录单独一块：用户最先想知道「为什么没成」，原因就放在这里（hover 看全文）
+      if (failedRows.length) {
+        host.appendChild(h('div', { class: 'one-ct-record-block', 'data-testid': 'one-ct-records-failed' }, [
+          h('div', { class: 'one-ct-record-head' }, [
+            h('div', { class: 'one-ct-card-title', text: '失败记录' }),
+            h('div', {
+              class: 'one-ct-hint',
+              text: '共 ' + failedEvents.length + ' 条 · 鼠标停在原因上可以看全文',
+            }),
+          ]),
+          rowsTable(failedRows, ['时间', '成员', '动作', '失败原因']),
+        ]));
+      }
     }
 
     els.main.appendChild(view);
@@ -5511,6 +5678,12 @@
       dot.style.background = memberColor(group.memberId);
       var rows = group.entries.map(function (entry) {
         var kindCn = LOG_KIND_CN[entry.kind] || '记录';
+        var textAttrs = { class: 'one-ct-log-text', text: entry.text };
+        // hover 看学校返回的完整原因（行内是截断版）
+        if (entry.detail) {
+          textAttrs.title = entry.detail;
+          textAttrs['data-has-detail'] = '1';
+        }
         return h('div', {
           class: 'one-ct-log-row one-ct-log--' + entry.kind,
           'data-testid': 'one-ct-log-row',
@@ -5522,7 +5695,7 @@
             title: kindCn + (entry.kind ? '（' + entry.kind + '）' : ''),
             'aria-label': kindCn,
           }),
-          h('span', { class: 'one-ct-log-text', text: entry.text }),
+          h('span', textAttrs),
         ]);
       });
       host.appendChild(
@@ -5558,6 +5731,81 @@
     } catch (e) {
       /* 存不下不影响使用，只是下次还会再提示一次 */
     }
+  }
+
+  /** 通用二次确认弹层（notice 样式 + 取消/确认两个按钮）；opts.onConfirm 只在点确认时执行。 */
+  function openConfirmModal(opts) {
+    closeModal();
+    var closed = false;
+    function finish(confirmed) {
+      if (closed) return;
+      closed = true;
+      closeModal();
+      if (confirmed && opts.onConfirm) opts.onConfirm();
+    }
+    var cancelTestid = (opts.testid || 'one-ct-confirm') + '-cancel';
+    var confirmTestid = (opts.testid || 'one-ct-confirm') + '-confirm';
+    var modalNode = h('div', {
+      class: 'one-ct-modal one-ct-modal--notice',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': opts.title,
+      'data-testid': opts.testid,
+    }, [
+      h('div', { class: 'one-ct-modal-head' }, [
+        h('div', { class: 'one-ct-card-head-main' }, [
+          h('div', { class: 'one-ct-modal-title', text: opts.title }),
+          opts.sub ? h('div', { class: 'one-ct-modal-sub', text: opts.sub }) : null,
+        ]),
+        h('button', {
+          class: 'one-ct-btn one-ct-btn--icon',
+          type: 'button',
+          text: '✕',
+          'aria-label': '关闭',
+          style: 'margin-left:auto',
+          'data-testid': cancelTestid,
+          onclick: function () {
+            finish(false);
+          },
+        }),
+      ]),
+      h('div', { class: 'one-ct-modal-body' }, opts.body),
+      h('div', { class: 'one-ct-modal-foot' }, [
+        h('span', { class: 'one-ct-spacer' }),
+        h('button', {
+          class: 'one-ct-btn',
+          type: 'button',
+          text: opts.cancelText || '先不清',
+          'data-testid': cancelTestid + '-btn',
+          onclick: function () {
+            finish(false);
+          },
+        }),
+        h('button', {
+          class: 'one-ct-btn one-ct-btn--primary',
+          type: 'button',
+          text: opts.confirmText || '确认',
+          'data-testid': confirmTestid,
+          onclick: function () {
+            finish(true);
+          },
+        }),
+      ]),
+    ]);
+    var backdrop = h('div', {
+      class: 'one-ct-modal-backdrop',
+      'data-testid': opts.testid + '-backdrop',
+      onclick: function (event) {
+        if (event.target === backdrop) finish(false);
+      },
+    }, [modalNode]);
+    var onKeydown = function (event) {
+      if (event.key === 'Escape') finish(false);
+    };
+    document.addEventListener('keydown', onKeydown);
+    document.body.appendChild(backdrop);
+    modal = { backdrop: backdrop, node: modalNode, onKeydown: onKeydown };
+    return { node: modalNode, finish: finish };
   }
 
   function openNoticeModal(opts) {
@@ -5779,6 +6027,8 @@
     _internals: {
       maskPhone: maskPhone,
       rowText: rowText,
+      rowDetail: rowDetail,
+      detailShort: detailShort,
       summaryText: summaryText,
       sanitizeError: sanitizeError,
       normalizeEkSession: normalizeEkSession,

@@ -4,11 +4,13 @@
  * 职责：成员 CRUD（`1ct:members`，未知字段不裁剪）｜引擎 storage 适配（auto3ct:* /
  * ct_ek_session_v1 / ct_unirun_accounts_v1 → 成员维度）｜生效 config（global ⊕ member，
  * 成员层不落 dryRun）｜二课凭证（loginEk / refreshEk / 微信扫码）｜校园跑验证｜runAll｜
- * 官方成绩同步（member.ekModules + 1ct:scores:<id>，失败不覆盖旧值）。
+ * 官方成绩同步（member.ekModules + 1ct:scores:<id>，失败不覆盖旧值）｜
+ * 清除今日失败锁定（clearFailedLocks：只删 1ct:state:<id>.failed 里今天的 key）。
  *
  * 安全口径：成员里存密码（IPC 需要），但日志/结果/导出/异常文本一律脱敏——sanitizeError
  * 抹 password/token/JSESSIONID/完整手机号；结果白名单不含凭证；手机号统一 138****0000。
- * 结果历史自带写入器（保留 memberId，result-store.js 冻结不改），请用 loadResults() 读。
+ * 结果历史自带写入器（保留 memberId，result-store.js 冻结不改），请用 loadResults() 读；
+ * 合并优先级 success > failed/unknown > blocked/skipped：后来的 blocked 不会冲掉真实失败原因。
  *
  * 用法：Node `require('./1ct/members.js').createMembers({storage, clock, automation})`；
  * 浏览器 `<script>` → window.OneCTMembers（默认单例，直接作用于 localStorage）。
@@ -656,9 +658,16 @@
     'category',
     'status',
     'reason',
+    // 学校返回的失败原因（脱敏后的一行人类可读文本）：UI 直接展示，缺省容忍
+    'detail',
     'stage',
     'distanceMeters',
     'attempt',
+    // 引擎附带的尝试次数（可能缺省）
+    'attempts',
+    // 同 key 再次被拦下时只更新这两个字段，结论（status/reason/detail）不动
+    'lastSeenAt',
+    'seenCount',
     'preview',
     'dryRun',
     'legacy',
@@ -667,7 +676,38 @@
     'memberName',
   ];
 
+  /**
+   * 合并优先级：success > failed/unknown > 其它（skipped/blocked/not-yet/waiting/legacy）。
+   * failed/unknown 是「真实失败结论」，必须能压过后来每轮重复写下的 blocked（locked-failed）。
+   */
+  var RESULT_STATUS_RANK = { success: 3, failed: 2, unknown: 2 };
+
+  function resultStatusRank(status) {
+    return RESULT_STATUS_RANK[text(status).toLowerCase()] || 1;
+  }
+
   var REASON_CODE_RE = /^[a-z][a-z0-9-]{0,63}$/;
+  var DETAIL_MAX_LEN = 200;
+  var DETAIL_SECRET_RE = /(password|passwd|access_token|refresh_token|jsessionid|token|secret|cookie)\s*[:=]\s*[^\s,;]+/gi;
+  var PHONE_IN_TEXT_RE = /\b1[3-9]\d{9}\b/g;
+
+  /**
+   * 学校返回的 errmsg（detail）：允许是人类可读自由文本，但必须脱敏后落库。
+   * 引擎侧已脱敏，这里再兜一次（存储是最后一道防线），并压空白/截断成一行。
+   */
+  function sanitizeDetail(raw) {
+    var value = text(raw, 600);
+    if (!value) return '';
+    value = value.replace(DETAIL_SECRET_RE, function (matched) {
+      return matched.split(/[:=]/)[0] + '=***';
+    });
+    value = value.replace(PHONE_IN_TEXT_RE, function (phone) {
+      return maskPhone(phone);
+    });
+    value = value.replace(/\s+/g, ' ').trim();
+    if (value.length > DETAIL_MAX_LEN) value = value.slice(0, DETAIL_MAX_LEN) + '…';
+    return value;
+  }
 
   /** 账号身份脱敏：完整手机号不可落库（与 result-store 同口径：opaque id 保留，手机号转哈希）。 */
   function normalizeAccountId(raw) {
@@ -775,9 +815,13 @@
       category: text(raw.category),
       status: status,
       reason: sanitizeReason(raw.reason),
+      detail: sanitizeDetail(raw.detail === undefined ? base.detail : raw.detail),
       stage: text(raw.stage),
       distanceMeters: finiteOrNull(raw.distanceMeters),
       attempt: finiteOrNull(raw.attempt),
+      attempts: finiteOrNull(raw.attempts === undefined ? base.attempts : raw.attempts),
+      lastSeenAt: finiteOrNull(raw.lastSeenAt),
+      seenCount: finiteOrNull(raw.seenCount),
       preview: false,
       dryRun: false,
       legacy: raw.legacy === true,
@@ -787,6 +831,7 @@
     };
     if (!event.day) event.day = beijingDay(event.at);
     if (event.attempt !== null) event.attempt = Math.max(0, Math.round(event.attempt));
+    if (event.attempts !== null) event.attempts = Math.max(0, Math.round(event.attempts));
     if (event.distanceMeters !== null && event.distanceMeters < 0) event.distanceMeters = null;
     if (event.legacy) {
       event.activityName = '';
@@ -800,7 +845,15 @@
     return text(event.memberId) + '\u0001' + text(event.key);
   }
 
-  /** 同 key 合并：保留首次信息，更丰富的字段补缺；success 不被 skipped/legacy 降级。 */
+  /**
+   * 同 key 合并：保留首次信息，更丰富的字段补缺。
+   * 优先级 success > failed/unknown > skipped/blocked/not-yet/waiting：
+   *  - 已 success 不被任何状态降级（首次成功的结论/时间稳定）；
+   *  - 已 failed/unknown 是真实失败结论：后来每轮写下的 blocked（locked-failed）
+   *    不得覆盖 status/reason/detail，首次失败时间也保留，只累计 lastSeenAt 与次数
+   *    —— 这就是「16:00 被学校拒绝的原因被 18:00 的 blocked 冲掉」的修复点；
+   *  - 反过来 blocked → failed 允许升级（补上真实原因），success 永远最高。
+   */
   function mergeResult(existing, incoming) {
     var merged = {};
     for (var i = 0; i < RESULT_ALLOWED_FIELDS.length; i += 1) {
@@ -820,6 +873,31 @@
       if (incoming.legacy) merged.legacy = false;
       return sanitizeResult(merged);
     }
+    if (resultStatusRank(existing.status) > resultStatusRank(incoming.status)) {
+      // 已有的 failed/unknown 优先：只记「最后一次被拦下」的时间和次数，
+      // 原始失败原因（reason/detail）与首次失败时间（at）原样保留。
+      merged.status = existing.status;
+      if (existing.reason) merged.reason = existing.reason;
+      if (existing.detail) merged.detail = existing.detail;
+      if (existing.attempts !== undefined) merged.attempts = existing.attempts;
+      var seenAt = finiteOrNull(incoming.at);
+      var lastSeenAt = finiteOrNull(existing.lastSeenAt);
+      if (seenAt !== null) {
+        merged.lastSeenAt = lastSeenAt === null ? seenAt : Math.max(lastSeenAt, seenAt);
+        merged.seenCount = (finiteOrNull(existing.seenCount) || 1) + 1;
+      }
+      // 补缺展示字段（不改写结论）
+      if (!merged.activityName && incoming.activityName) merged.activityName = incoming.activityName;
+      if (!merged.activityId && incoming.activityId) merged.activityId = incoming.activityId;
+      if (!merged.category && incoming.category) merged.category = incoming.category;
+      if (!merged.stage && incoming.stage) merged.stage = incoming.stage;
+      if (!merged.memberName && incoming.memberName) merged.memberName = incoming.memberName;
+      if (!merged.accountMask && incoming.accountMask) merged.accountMask = incoming.accountMask;
+      if (merged.distanceMeters === undefined && incoming.distanceMeters !== undefined) {
+        merged.distanceMeters = incoming.distanceMeters;
+      }
+      return sanitizeResult(merged);
+    }
     for (var j = 0; j < RESULT_ALLOWED_FIELDS.length; j += 1) {
       var name = RESULT_ALLOWED_FIELDS[j];
       var next = incoming[name];
@@ -829,11 +907,16 @@
         merged[name] = next;
       } else if (name === 'at') {
         merged.at = Math.max(Number(prev) || 0, Number(next) || 0);
-      } else if (name === 'distanceMeters' || name === 'attempt') {
+      } else if (name === 'distanceMeters' || name === 'attempt' || name === 'attempts') {
         merged[name] = next;
+      } else if (name === 'lastSeenAt') {
+        merged.lastSeenAt = Math.max(Number(prev) || 0, Number(next) || 0);
+      } else if (name === 'seenCount') {
+        merged.seenCount = Math.max(Number(prev) || 1, Number(next) || 1);
       } else if (name === 'status') {
         merged.status = next;
-      } else if (name === 'activityName' || name === 'stage' || name === 'reason') {
+      } else if (name === 'activityName' || name === 'stage' || name === 'reason' || name === 'detail') {
+        // 更丰富/更新鲜的说明：更新覆盖（detail 是学校返回的最新原因）
         merged[name] = next;
       } else {
         merged[name] = prev;
@@ -2051,9 +2134,12 @@
             category: rawRow.category,
             status: rawRow.status,
             reason: rawRow.reason,
+            detail: rawRow.detail,
             stage: rawRow.stage,
             distanceMeters: rawRow.distanceMeters,
             attempt: rawRow.attempt,
+            attempts: rawRow.attempts,
+            lastSeenAt: rawRow.lastSeenAt,
             source: rawRow.source,
             memberId: text(rawRow.memberId) || memberId,
             memberName: text(rawRow.memberName) || memberName,
@@ -2158,6 +2244,96 @@
         /* ignore */
       }
       return true;
+    }
+
+    /**
+     * 清除「今日失败锁定」：只删 1ct:state:<memberId>.failed 里 key 以今天（北京日）
+     * 开头的项 —— 引擎因此只锁当天，清了之后下一轮会重新尝试。
+     *
+     * 口径（严格）：
+     *  - 只碰 failed；done / inflight / 其它计数与结果历史（1ct:results）一律不动；
+     *  - 只处理启用成员（options.memberId 可指定单个成员）；
+     *  - 引擎 key 形如 `YYYY-MM-DD|账号|模块|活动|动作`，用「key 以今天开头」判归属；
+     *  - options.dryRun 只统计不落盘（UI 用它决定按钮是否可点）。
+     *
+     * @returns {{cleared:number, today:string, dryRun:boolean, corrupt:boolean,
+     *   members:Array<{memberId,memberName,cleared,keys,error?}>}}
+     */
+    function clearFailedLocks(options) {
+      var opts = isPlainObject(options) ? options : {};
+      var dryRun = opts.dryRun === true;
+      var today = beijingDay(now());
+      var onlyMemberId = text(opts.memberId);
+      var state = readMembersState();
+      var out = { cleared: 0, today: today, dryRun: dryRun, corrupt: state.corrupt === true, members: [] };
+      if (state.corrupt) return out;
+      var targets = state.items.filter(function (member) {
+        if (onlyMemberId) return text(member.id) === onlyMemberId;
+        return member.enabled === true;
+      });
+      targets.forEach(function (member) {
+        var id = text(member.id);
+        if (!id) return;
+        var raw = null;
+        try {
+          raw = storage.get(STATE_PREFIX + id);
+        } catch (e) {
+          raw = null;
+        }
+        if (!raw) return;
+        var parsed = null;
+        try {
+          parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch (e) {
+          return; // state 损坏：不猜、不覆盖（引擎侧同口径 fail-closed）
+        }
+        if (!isPlainObject(parsed) || !isPlainObject(parsed.failed)) return;
+        var failed = parsed.failed;
+        var removedKeys = [];
+        Object.keys(failed).forEach(function (key) {
+          if (text(key).indexOf(today) === 0) removedKeys.push(key);
+        });
+        if (!removedKeys.length) return;
+        if (dryRun) {
+          out.cleared += removedKeys.length;
+          out.members.push({
+            memberId: id,
+            memberName: text(member.name),
+            cleared: removedKeys.length,
+            keys: removedKeys,
+          });
+          return;
+        }
+        var next = {};
+        Object.keys(parsed).forEach(function (name) {
+          next[name] = parsed[name];
+        });
+        var nextFailed = {};
+        Object.keys(failed).forEach(function (key) {
+          if (removedKeys.indexOf(key) < 0) nextFailed[key] = failed[key];
+        });
+        next.failed = nextFailed;
+        try {
+          storage.set(STATE_PREFIX + id, JSON.stringify(next));
+        } catch (e) {
+          out.members.push({
+            memberId: id,
+            memberName: text(member.name),
+            cleared: 0,
+            keys: removedKeys,
+            error: 'storage-write-failed',
+          });
+          return;
+        }
+        out.cleared += removedKeys.length;
+        out.members.push({
+          memberId: id,
+          memberName: text(member.name),
+          cleared: removedKeys.length,
+          keys: removedKeys,
+        });
+      });
+      return out;
     }
 
     function toDay(value) {
@@ -2610,6 +2786,8 @@
       loadResults: loadResults,
       resultsHealth: resultsHealth,
       clearResults: clearResults,
+      // 清除今日失败锁定（只删 1ct:state:<id>.failed 里今天开头的 key）
+      clearFailedLocks: clearFailedLocks,
 
       // 导出（脱敏）
       toPublicMember: toPublicMember,
@@ -2678,6 +2856,7 @@
     'loadResults',
     'resultsHealth',
     'clearResults',
+    'clearFailedLocks',
     'toPublicMember',
     'exportMembers',
     'runAll',
