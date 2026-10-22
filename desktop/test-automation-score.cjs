@@ -118,6 +118,8 @@ function makeEngine(opts = {}) {
   ['ek', 'club', 'unirun'].forEach((name) => {
     if (config[name] && config[name].enabled === undefined) config[name].enabled = true;
   });
+  // 单测默认开启 3CT 社区图库（覆盖图库解码路径）；生产默认关闭。
+  if (config.ek && config.ek.backendGallery === undefined) config.ek.backendGallery = true;
   const engine = A.createEngine({
     api,
     storage,

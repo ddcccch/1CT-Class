@@ -1081,7 +1081,7 @@
         }),
       ]),
     );
-    unirunGroup.appendChild(field('每日执行时刻（HH:mm）', textInput('unirun.runAt', '06:30')));
+    unirunGroup.appendChild(field('每日执行时刻（HH:mm）', textInput('unirun.runAt', '19:00')));
     unirunGroup.appendChild(field('有效窗口（分钟）', numberInput('unirun.windowMinutes', 1, 720, 5)));
     unirunGroup.appendChild(field('里程（米）', numberInput('unirun.runDistance', 1000, 10000, 100)));
     unirunGroup.appendChild(field('时长（分钟）', numberInput('unirun.runTime', 5, 300, 5)));
@@ -1113,7 +1113,7 @@
     ekGroup.appendChild(field('重试间隔（分钟）', numberInput('ek.qrRetryMinutes', 0, 60, 1)));
     ekGroup.appendChild(field('最多尝试次数', numberInput('ek.qrMaxAttempts', 1, 10, 1)));
     ekGroup.appendChild(
-      h('div', { class: 'a3-hint', text: '仅扫码方式(SignWay=1)可自动；拍照/定位/验证码需人工，缺材料时只等待不假成功。' }),
+      h('div', { class: 'a3-hint', text: '扫码方式(SignWay=1)可自动；志愿者未上传二维码时走官方 StuSaveSignIn 无码兜底。拍照/定位/验证码仍需人工，缺材料时只等待不假成功。' }),
     );
 
     return h('div', { class: 'a3-tab-body' }, [
