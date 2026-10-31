@@ -11,6 +11,17 @@
 
 **1CT 与 3CT 完全独立**：1CT 使用自己的 `%APPDATA%\1CT` 用户数据目录与独立单实例锁，**可与 3CT / 3CT-Auto 同时运行**、互不干扰（代价是首次启动需在 1CT 里重新登录）。需要回退到共用数据目录时加 `--shared-user-data` 或设 `CT_SHARE_USER_DATA=1`。1CT 构建：`python desktop/install_1ct.py build --force`，使用说明见 [1CT 使用说明](docs/1ct-usage.md)，打包细节见 [打包说明](desktop/1ct/packaging.md)。
 
+**给别人的升级包（双击即升级，放哪都行）**：`python desktop/build_updater_1ct.py --source dist\1CT-1.2.3\1CT --out dist\1CT升级包-1.2.3 --force --version-line "1CT 1.2.3 校园跑校区/节奏修复 · 2026-10-31"` 会产出 `升级1CT.exe`（单文件、自带新版 `app.asar`）。**必须显式写 `--source` / `--out`**：默认 `--source 1CT` 指向本机现装的旧 `app.asar`，不写就会把旧包重新打成新版本号发出去。对方把这个 exe 放任意位置双击即可：自动查找 1CT（exe 旁 → `%APPDATA%\1CT\logs` 日志线索 → 桌面/下载/文档/Program Files/盘根有界扫描 → 找不到才让人选目录）→ 关闭 1CT（含托盘）→ 备份到 `1CT\.backup\<时间戳>\` → 覆盖并校验 sha256 → 重启；升级包内嵌 asar 与 `payload.json` 声明的 sha256 不一致时**直接拒绝、一个文件都不写**。`%APPDATA%\1CT` 用户数据一个字节都不碰，回滚就是把备份的 `app.asar` 复制回 `resources\app.asar`。源码见 [Updater1CT.cs](desktop/Updater1CT.cs)，端到端测试 `python -m unittest tests.test_updater_1ct -v`。
+
+## 1.2.3（本轮）
+
+- **校园跑校区**：1CT 是独立用户数据目录，`%APPDATA%\1CT` 下没有 3CT 的 `unirun\localdb.v1.json`，所以校区库一开始是空的，运行会停在「未选择跑步校区」。现在在「校园跑」卡片里可以「从云端获取校区列表」→ 选自己的学校/校区 →「下载并保存」地图；没有列表时点「从云端获取更多校区」。
+- **官方配速**：官方客户端要求 4~10 km/h。里程/时长组合超出这个区间会被拦成 `waiting-material / pace-out-of-range` 并给出建议值，**不会偷偷改用户填的数**；界面提供「恢复自动合法参数」。旧文档里「末位不能是 0」「时长 31~39 且排除 5 的倍数」这类说法没有官方依据，已删除。
+- **俱乐部**：活动条目的日期字段是 `mmdd` / `nextMmdd`（没有 `yymmdd`），现在补上 MM-DD 日期，并用**「完整活动名称（含校区）+ 完整日期 + 开始时刻 + 结束时刻」四元组**匹配官方记录作为签到/完成证据（记录条目与任务的 id 不是同一命名空间，所以不按 id 对号；非零小数秒不会被截断误合并）；拿不到坐标时展示 `waiting-material / need-coords` 并给出填写指引（不会用空坐标或别的活动的坐标提交）。**俱乐部链路仍未在真实活动窗口内端到端验收**。
+- **升级器**：`payload.json` 声明的 asar sha256 与实际内嵌字节不一致时硬失败（退出码 3），不再「警告后继续装」。
+
+测试边界：`node --test desktop\test-automation.cjs` 146、`test-1ct-members.cjs` 118、`node desktop\test-1ct-shell.cjs` 426（自定义 harness）；`pytest tests/test_repack_1ct_incremental.py` 28 passed / 1 skipped、`python -m unittest tests.test_updater_1ct` 23 passed。`python -m unittest discover -s tests` 全量里另有 2 个已知失败（`tests/test_gui_launcher.py` 需要 `3CT\resources\assets\icon.ico`，本机没有 3CT 目录，与 1CT 无关）。
+
 ## 交付入口
 
 **本机已生成可运行副本。** 日常请双击根目录的 `启动3CT自动版.exe`（构建产物），这是带图标、无命令窗口的图形入口。副本目录内也有同名入口；原来的 [CMD 启动器](start-3ct-auto.cmd) 仅作为排错备用。
@@ -63,7 +74,7 @@ python -m unittest discover -s reverse -p "test_*.py" -v
 node --test desktop/test-automation.cjs
 ```
 
-本次「签到失败有界重试 + 失败原因落盘与展示 + 清除今日失败锁定 + 俱乐部窗口/坐标修正」已验证：Python 293 项、Node 引擎/积分/成员/统计 379 项、界面浏览器断言 364 项、打包后 Electron 冒烟 32+45 项，合计 **1113 项全部 0 fail**。原始 ASAR 未改，重建后的 app.asar 通过 verify（哈希 / 注入清单 / 启动器 / 图标全过）；无控制台图形入口保留。真实账号只读端到端已验证：官网「报名/完成列表」签到状态（SignD/SignT）、每个已报名活动的签到/签退时段（两行完整显示）、最近 6 个官方签到/签退成功记录均在 1CT 二课页正确显示，未提交任何签到/报名写请求。验证方式：`node desktop/test-1ct-shell.cjs`（界面 347 条）、`node tests/packaged-1ct-smoke.cjs`、`node tests/packaged-1ct-renderer.cjs`；证据 JSON 与截图只留在本机 artifacts/，不随仓库分发。
+本次「签到失败有界重试 + 失败原因落盘与展示 + 清除今日失败锁定 + 俱乐部窗口/坐标修正」在 **1.2.0 当时**验证过（下列数字是当时口径，当前套件见上文「1.2.3」测试边界）：Python 293 项、Node 引擎/积分/成员/统计 379 项、界面浏览器断言 364 项、打包后 Electron 冒烟 32+45 项，合计 **1113 项全部 0 fail**。原始 ASAR 未改，重建后的 app.asar 通过 verify（哈希 / 注入清单 / 启动器 / 图标全过）；无控制台图形入口保留。真实账号只读端到端已验证：官网「报名/完成列表」签到状态（SignD/SignT）、每个已报名活动的签到/签退时段（两行完整显示）、最近 6 个官方签到/签退成功记录均在 1CT 二课页正确显示，未提交任何签到/报名写请求。验证方式：`node desktop/test-1ct-shell.cjs`（界面 347 条）、`node tests/packaged-1ct-smoke.cjs`、`node tests/packaged-1ct-renderer.cjs`；证据 JSON 与截图只留在本机 artifacts/，不随仓库分发。
 
 当前二课自动签到以扫码方式（SignWay=1）为主，并内置无二维码兜底：志愿者未上传二维码时调用官方 `StuSaveSignIn`（`SignWay=1`、空照片/定位）完成签到/签退，实测官方记录会更新为「已签到/已签退」。拍照、定位＋拍照、验证码方式仍需人工；二课会话过期时也需要重新登录。无二维码时的兜底已内置，不需要额外配置。
 
