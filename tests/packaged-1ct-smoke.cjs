@@ -32,9 +32,38 @@ const PLAYWRIGHT_CORE =
   ].find((candidate) => { try { return fs.existsSync(candidate); } catch (e) { return false; } }) ||
   'playwright-core';
 const ROOT = path.resolve(__dirname, '..');
+
+/**
+ * 被测目录（默认=仓库根，即现装 1CT，行为与本文件历史版本完全一致）。
+ *
+ * 为什么要可切换：新版本必须先在 dist/1CT-1.2.x 上冒烟，绝不能为了验证而
+ * 覆盖/启动现装 1CT。用法：
+ *   node tests/packaged-1ct-smoke.cjs                      # 现装（默认）
+ *   node tests/packaged-1ct-smoke.cjs --target dist/1CT-1.2.3
+ */
+function parseTarget(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--target') {
+      const value = argv[i + 1];
+      if (!value) throw new Error('--target 需要一个目录参数');
+      return path.resolve(value);
+    }
+    if (arg.startsWith('--target=')) return path.resolve(arg.slice('--target='.length));
+  }
+  return ROOT;
+}
+
+const TARGET_DIR = parseTarget(process.argv.slice(2));
+const IS_INSTALLED = TARGET_DIR === ROOT;
 const OUT = path.join(ROOT, 'artifacts');
-const RESULT_JSON = path.join(OUT, '1ct-packaged-smoke-result.json');
-const LAUNCHER = path.join(ROOT, '启动1CT.exe');
+const RESULT_JSON = path.join(
+  OUT,
+  IS_INSTALLED
+    ? '1ct-packaged-smoke-result.json'
+    : `1ct-packaged-smoke-result-${path.basename(TARGET_DIR)}.json`
+);
+const LAUNCHER = path.join(TARGET_DIR, '启动1CT.exe');
 
 const checks = [];
 function check(name, ok, detail) {
@@ -164,7 +193,7 @@ async function main() {
   const result = { startedAt, port, profile, checks };
   try {
     const child = spawn(LAUNCHER, [`--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--no-first-run'], {
-      cwd: ROOT,
+      cwd: TARGET_DIR,
       windowsHide: true,
       stdio: 'ignore',
       // 故意污染父进程环境：验证 GUI 启动器只清理子进程的 Node 模式变量。
