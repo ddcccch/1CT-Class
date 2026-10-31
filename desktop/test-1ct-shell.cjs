@@ -37,7 +37,7 @@ const FAILURE_JSON = path.join(ARTIFACTS, '1ct-shell-failure.json');
 const HARNESS_URL = '/harness/index.html';
 // 首次使用说明 / 本版更新公告的标记键（与 shell.js 保持一致）
 const ONBOARD_KEY = '1ct:onboard:v1';
-const WHATSNEW_KEY = '1ct:whatsnew:1.2.1';
+const WHATSNEW_KEY = '1ct:whatsnew:1.2.3';
 
 const EDGE_CANDIDATES = [
   process.env.EDGE_PATH,
@@ -99,7 +99,7 @@ const INJECTED = String.raw`
     methodNames.forEach(function (name) {
       api[name] = function (payload) {
         var full = prefix + '.' + name;
-        calls.push({ module: prefix, name: name, full: full });
+        calls.push({ module: prefix, name: name, full: full, payload: payload });
         if (WRITE_METHODS[name]) writes.push(full);
         if (overrides && Object.prototype.hasOwnProperty.call(overrides, name)) return overrides[name](payload);
         return Promise.resolve(emptyPaged());
@@ -617,9 +617,9 @@ const INJECTED = String.raw`
         access_token: 'fake-access-token',
         refresh_token: 'fake-refresh-token',
         user_info: {
-          loginName: payload && payload.student_id ? String(payload.student_id) : '2024101164',
+          loginName: payload && payload.student_id ? String(payload.student_id) : '2099000001',
           userName: '测试学生',
-          studentId: payload && payload.student_id ? String(payload.student_id) : '2024101164',
+          studentId: payload && payload.student_id ? String(payload.student_id) : '2099000001',
         },
       });
     },
@@ -630,14 +630,14 @@ const INJECTED = String.raw`
         JSESSIONID: 'fake-jsession-refreshed-' + now(),
         access_token: 'fake-access-token-2',
         refresh_token: 'fake-refresh-token-2',
-        user_info: { loginName: '2024101164', userName: '测试学生' },
+        user_info: { loginName: '2099000001', userName: '测试学生' },
       });
     },
     checkLogin: function () {
-      return Promise.resolve({ code: 0, data: { loginName: '2024101164' } });
+      return Promise.resolve({ code: 0, data: { loginName: '2099000001' } });
     },
     getStudentScores: function () {
-      return Promise.resolve({ code: 0, data: { Info: { StudentId: '2024101164' }, TypeList: [] } });
+      return Promise.resolve({ code: 0, data: { Info: { StudentId: '2099000001' }, TypeList: [] } });
     },
     // 官方「已报名列表」（activityStatus:'1'）；模式可在测试里切换 ok/fail/empty/paged
     getActivitiesList: function (payload) {
@@ -704,7 +704,7 @@ const INJECTED = String.raw`
         JSESSIONID: 'fake-jsession-qr-' + now(),
         access_token: 'fake-access-token',
         refresh_token: 'fake-refresh-token',
-        user_info: { loginName: '2024101164', userName: '扫码学生', studentId: '2024101164' },
+        user_info: { loginName: '2099000001', userName: '扫码学生', studentId: '2099000001' },
       });
     },
     // 官方签到记录（GetStuActSignList）：真实形态 { PageList:{Items,CurrentPage,TotalPages} }
@@ -724,6 +724,19 @@ const INJECTED = String.raw`
     },
   };
 
+  // 校园跑校区库：本地/云端/pull 都可控，用来验证「本地空 → 云端选 → 下载 → 确认 → 写 campusId」
+  var campusFake = {
+    local: [{ id: 'campus-1', label: '主校区', mapName: 'main', schoolSiteIndex: 0, updatedAt: now() }],
+    cloud: [
+      { id: 'campus-1', label: '主校区', map_name: 'main', school_site_index: 0 },
+      { id: 'campus-2', label: '分校区', map_name: 'branch', school_site_index: 1 },
+    ],
+    localMode: 'ok', // ok | fail
+    cloudMode: 'ok', // ok | fail | empty
+    pullMode: 'ok', // ok | fail | noop（下载返回成功但库里没有）
+    counts: { local: 0, cloud: 0, pull: 0 },
+  };
+
   var unirunOverrides = {
     sessionEnsure: function () {
       return Promise.resolve({ userId: 1, schoolId: 2, studentId: 3, userName: '测试学生', schoolName: '测试大学' });
@@ -735,7 +748,29 @@ const INJECTED = String.raw`
       });
     },
     campusLocalList: function () {
-      return Promise.resolve([{ id: 'campus-1', label: '主校区', mapName: 'main', schoolSiteIndex: 0, updatedAt: now() }]);
+      campusFake.counts.local += 1;
+      if (campusFake.localMode === 'fail') return Promise.reject(new Error('localdb read failed'));
+      return Promise.resolve(campusFake.local.slice());
+    },
+    campusCloudList: function () {
+      campusFake.counts.cloud += 1;
+      if (campusFake.cloudMode === 'fail') return Promise.reject(new Error('cloud list upstream 500'));
+      if (campusFake.cloudMode === 'empty') return Promise.resolve([]);
+      return Promise.resolve(campusFake.cloud.slice());
+    },
+    campusCloudPull: function (payload) {
+      campusFake.counts.pull += 1;
+      var id = String((payload && payload.campusId) || '');
+      if (campusFake.pullMode === 'fail') return Promise.reject(new Error('pull upstream 500'));
+      if (campusFake.pullMode === 'noop') return Promise.resolve({ ok: true });
+      var hit = campusFake.cloud.filter(function (c) { return c.id === id; })[0];
+      if (hit) {
+        campusFake.local = campusFake.local.concat([{
+          id: hit.id, label: hit.label, mapName: hit.map_name,
+          schoolSiteIndex: hit.school_site_index, updatedAt: now(),
+        }]);
+      }
+      return Promise.resolve({ ok: true, campus: hit || null });
     },
     runOverview: function () {
       return Promise.resolve({ runCount: 0, runDistance: 0, clubCount: 0, semesterEnd: '' });
@@ -760,7 +795,7 @@ const INJECTED = String.raw`
     ], ekOverrides),
     unirun: makeApi('unirun', [
       'login', 'sessionEnsure', 'sessionClear', 'runRecords', 'runOverview', 'generateTrack',
-      'autoRun', 'campusLocalList',
+      'autoRun', 'campusLocalList', 'campusCloudList', 'campusCloudPull',
     ], unirunOverrides),
     club: makeApi('club', [
       'activityList', 'myActivityList', 'mySemesterActivity', 'studentRecord', 'validSignUpCount',
@@ -815,6 +850,18 @@ const INJECTED = String.raw`
     removeWindowApi: function () {
       delete window.ctAPI.system.window;
     },
+  };
+
+  // 校园跑校区 fake 的控制面：本地库/云端清单/下载行为都可切换
+  window.__ONE_CT_FAKE_CAMPUS__ = {
+    setLocal: function (rows) { campusFake.local = Array.isArray(rows) ? rows.slice() : []; },
+    setCloud: function (rows) { campusFake.cloud = Array.isArray(rows) ? rows.slice() : []; },
+    setLocalMode: function (mode) { campusFake.localMode = mode; },
+    setCloudMode: function (mode) { campusFake.cloudMode = mode; },
+    setPullMode: function (mode) { campusFake.pullMode = mode; },
+    counts: function () { return Object.assign({}, campusFake.counts); },
+    resetCounts: function () { campusFake.counts = { local: 0, cloud: 0, pull: 0 }; },
+    local: function () { return campusFake.local.slice(); },
   };
 
   // 扫码 fake 的控制面：切换成功/过期/取图失败，模拟老版本缺 API
@@ -940,11 +987,11 @@ const INJECTED = String.raw`
             JSESSIONID: 'fake-jsession-seed',
             access_token: 'fake-access-token',
             refresh_token: 'fake-refresh-token',
-            user_info: { loginName: '2024101164', userName: '张三' },
+            user_info: { loginName: '2099000001', userName: '张三' },
           },
           ekStatus: 'ok',
           ekUpdatedAt: t - 3600000,
-          ekCredentials: { studentId: '2024101164', password: 'fake-pw' },
+          ekCredentials: { studentId: '2099000001', password: 'fake-pw' },
           unirun: { id: 'u_zhangsan', phone: '13800000000', password: 'fake-unirun-pw', remark: '' },
           ekModules: MODULES,
           createdAt: t - 90 * DAY,
@@ -958,7 +1005,7 @@ const INJECTED = String.raw`
           ek: null,
           ekStatus: 'expired',
           ekUpdatedAt: t - 30 * DAY,
-          ekCredentials: { studentId: '2024101170', password: 'fake-pw' },
+          ekCredentials: { studentId: '2099000002', password: 'fake-pw' },
           unirun: { id: 'u_wangwu', phone: '13700002222', password: 'fake-unirun-pw', remark: '' },
           ekModules: MODULES2,
           createdAt: t - 60 * DAY,
@@ -1061,9 +1108,9 @@ const INJECTED = String.raw`
     window.localStorage.setItem('1ct:scores:m_zhangsan', JSON.stringify({
       version: 1,
       accounts: {
-        '2024101164': {
+        '2099000001': {
           snapshot: {
-            accountId: '2024101164',
+            accountId: '2099000001',
             source: 'official',
             updatedAt: t - 6 * 3600000,
             modules: MODULES.map(function (m) {
@@ -1079,7 +1126,7 @@ const INJECTED = String.raw`
     // 默认预置「已经看过首次说明和本版更新」：后面的用例不会被弹层挡住；
     // 「首次进入弹引导 / 公告只弹一次」的用例会先清掉这两个标记再验证。
     window.localStorage.setItem('1ct:onboard:v1', String(t));
-    window.localStorage.setItem('1ct:whatsnew:1.2.1', String(t));
+    window.localStorage.setItem('1ct:whatsnew:1.2.3', String(t));
   }
 })();
 `;
@@ -1273,11 +1320,20 @@ async function main() {
     check('说明关闭后紧接着弹出本版更新', await page.getByTestId('one-ct-whatsnew-modal').isVisible());
     const whatsnewText = await page.getByTestId('one-ct-whatsnew-modal').textContent();
     check(
-      '更新公告列出 5 条变化（含「去掉预览开关」）',
+      '更新公告列出 5 条变化（本版：校园跑校区与真实执行落盘）',
       (await page.locator('[data-testid="one-ct-whatsnew-item"]').count()) === 5,
       String(await page.locator('[data-testid="one-ct-whatsnew-item"]').count()),
     );
-    check('更新公告写了自动重试、失败原因和俱乐部坐标', /重试/.test(whatsnewText) && /失败原因/.test(whatsnewText) && /俱乐部/.test(whatsnewText) && /微信扫码/.test(whatsnewText), whatsnewText.slice(0, 120));
+    check(
+      '更新公告写了校园跑校区/真实执行落盘/配速拦截/俱乐部沿用',
+      /校园跑/.test(whatsnewText) && /跑步校区/.test(whatsnewText) && /真实执行/.test(whatsnewText) && /4–10 km\/h/.test(whatsnewText) && /俱乐部/.test(whatsnewText),
+      whatsnewText.slice(0, 120),
+    );
+    check(
+      '更新公告副标题带版本号（1CT 1.2.3）',
+      /1CT 1\.2\.3/.test(whatsnewText),
+      whatsnewText.slice(0, 60),
+    );
     shots.push(await screenshot(page, '1ct-shell-00-whatsnew.png'));
     await page.getByTestId('one-ct-whatsnew-ok').click();
     await page.waitForTimeout(400);
@@ -1621,6 +1677,120 @@ async function main() {
     for (const gone of ['one-ct-ek-photosign', 'one-ct-ek-captchasign', 'one-ct-club-join', 'one-ct-club-signin', 'one-ct-club-signout']) {
       check('冗余开关已移除：' + gone, (await page.getByTestId(gone).count()) === 0);
     }
+    // ── task-4：俱乐部校区 / 签到点坐标 / 跨校区开关（龙泉校区签不上的自助入口） ──
+    // 注意：上面「冗余开关已移除」的历史断言继续保留（club 仍然没有 signin/signout 开关），
+    // 这里补的是「校区 + 签到点坐标」这类新参数。
+    const clubCampus = await page.evaluate(() => {
+      const node = document.querySelector('[data-testid="one-ct-club-campus"]');
+      if (!node) return null;
+      return {
+        tag: node.tagName,
+        value: node.value,
+        options: Array.from(node.options).map((opt) => opt.value + '/' + opt.textContent.trim()),
+      };
+    });
+    check('俱乐部卡片有校区选择（下拉，不是开关）', Boolean(clubCampus) && clubCampus.tag === 'SELECT', JSON.stringify(clubCampus));
+    check(
+      '校区选项为「不筛选 / 航空港 / 龙泉」',
+      Boolean(clubCampus) && clubCampus.options.join('|') === '/不筛选|航空港/航空港|龙泉/龙泉',
+      JSON.stringify(clubCampus && clubCampus.options),
+    );
+    check(
+      '校区默认「不筛选」（不改变旧行为）',
+      Boolean(clubCampus) && clubCampus.value === '',
+      JSON.stringify(clubCampus && clubCampus.value),
+    );
+    const clubCoords = await page.evaluate(() =>
+      ['one-ct-club-fallback-lat', 'one-ct-club-fallback-lng'].map((id) => {
+        const node = document.querySelector(`[data-testid="${id}"]`);
+        return node ? { id, tag: node.tagName, type: node.getAttribute('type'), value: node.value } : { id, tag: null };
+      }),
+    );
+    check(
+      '签到点坐标是两个可编辑输入框（纬度 + 经度，允许空）',
+      clubCoords.every((item) => item.tag === 'INPUT' && item.type === 'text'),
+      JSON.stringify(clubCoords),
+    );
+    check('签到点坐标默认留空', clubCoords.every((item) => item.value === ''), JSON.stringify(clubCoords));
+    check(
+      '跨校区开关存在且默认关闭',
+      (await page.getByTestId('one-ct-club-allowothercampus').count()) === 1 &&
+        (await page.getByTestId('one-ct-club-allowothercampus').isChecked()) === false,
+      `count=${await page.getByTestId('one-ct-club-allowothercampus').count()}`,
+    );
+    const clubCardText = (await page.getByTestId('one-ct-module-club-card').textContent()).replace(/\s+/g, ' ');
+    check(
+      '签到点坐标说明写清「不填则一直停在缺少坐标」',
+      /学校没下发签到位时用它提交/.test(clubCardText) && /缺少坐标/.test(clubCardText),
+      clubCardText.slice(0, 160),
+    );
+    check(
+      '跨校区开关说明写清风险（可能把记录落到别的校区）',
+      /可能把记录落到别的校区/.test(clubCardText),
+      clubCardText.slice(0, 160),
+    );
+
+    // 新控件必须能持久化到 1ct:config:global（换机/重启后仍然生效）
+    await page.getByTestId('one-ct-club-campus').selectOption('龙泉');
+    await page.waitForTimeout(300);
+    await page.getByTestId('one-ct-club-fallback-lat').fill('30.5678');
+    await page.getByTestId('one-ct-club-fallback-lat').dispatchEvent('change');
+    await page.getByTestId('one-ct-club-fallback-lng').fill('104.2345');
+    await page.getByTestId('one-ct-club-fallback-lng').dispatchEvent('change');
+    await page.getByTestId('one-ct-club-allowothercampus').check();
+    await page.waitForTimeout(400);
+    const clubCfgSet = await readGlobalConfig(page);
+    const clubCfgSetClub = clubCfgSet.club || {};
+    check('校区选择落盘到 club.campusName', clubCfgSetClub.campusName === '龙泉', JSON.stringify(clubCfgSetClub.campusName));
+    check(
+      '签到点纬度落盘到 club.fallbackLatitude',
+      String(clubCfgSetClub.fallbackLatitude) === '30.5678',
+      JSON.stringify(clubCfgSetClub.fallbackLatitude),
+    );
+    check(
+      '签到点经度落盘到 club.fallbackLongitude',
+      String(clubCfgSetClub.fallbackLongitude) === '104.2345',
+      JSON.stringify(clubCfgSetClub.fallbackLongitude),
+    );
+    check('跨校区开关落盘为 true', clubCfgSetClub.allowOtherCampus === true, JSON.stringify(clubCfgSetClub.allowOtherCampus));
+
+    // 非法坐标不落盘、输入框还原（不能把「abc」当坐标提交给学校）
+    await page.getByTestId('one-ct-club-fallback-lat').fill('abc');
+    await page.getByTestId('one-ct-club-fallback-lat').dispatchEvent('change');
+    await page.waitForTimeout(350);
+    const badCoord = {
+      input: await page.getByTestId('one-ct-club-fallback-lat').inputValue(),
+      stored: (await readGlobalConfig(page)).club.fallbackLatitude,
+    };
+    check(
+      '非法坐标不落盘、输入框还原',
+      badCoord.input === '30.5678' && String(badCoord.stored) === '30.5678',
+      JSON.stringify(badCoord),
+    );
+
+    // 还原默认（不筛选 / 坐标空 / 跨校区关），避免影响后续运行用例
+    await page.getByTestId('one-ct-club-campus').selectOption('');
+    await page.getByTestId('one-ct-club-fallback-lat').fill('');
+    await page.getByTestId('one-ct-club-fallback-lat').dispatchEvent('change');
+    await page.getByTestId('one-ct-club-fallback-lng').fill('');
+    await page.getByTestId('one-ct-club-fallback-lng').dispatchEvent('change');
+    await page.getByTestId('one-ct-club-allowothercampus').uncheck();
+    await page.waitForTimeout(400);
+    const clubCfgReset = (await readGlobalConfig(page)).club || {};
+    check(
+      '还原默认：校区不筛选 / 坐标清空 / 跨校区关闭',
+      clubCfgReset.campusName === '' &&
+        String(clubCfgReset.fallbackLatitude) === '' &&
+        String(clubCfgReset.fallbackLongitude) === '' &&
+        clubCfgReset.allowOtherCampus === false,
+      JSON.stringify({
+        campusName: clubCfgReset.campusName,
+        lat: clubCfgReset.fallbackLatitude,
+        lng: clubCfgReset.fallbackLongitude,
+        allow: clubCfgReset.allowOtherCampus,
+      }),
+    );
+
     check('校园跑时长是只读行（不是输入框）', await page.evaluate(() => {
       const node = document.querySelector('[data-testid="one-ct-unirun-time"]');
       return Boolean(node) && node.tagName !== 'INPUT';
@@ -1900,7 +2070,7 @@ async function main() {
     check('成员列表手机号已掩码', /138\*\*\*\*0000/.test(membersHtml), 'masked');
     check('成员列表不含完整手机号', !membersHtml.includes('13800000000'), 'no plain phone');
     check('成员列表不含密码/token 明文', !/fake-pw|fake-access-token|fake-refresh-token/i.test(membersHtml), 'no secrets');
-    check('二课徽标显示已登录 + 学号', /已登录 ·\s*2024101164/.test(memberRows.join(' ')), (memberRows[0] || '').slice(0, 90));
+    check('二课徽标显示已登录 + 学号', /已登录 ·\s*2099000001/.test(memberRows.join(' ')), (memberRows[0] || '').slice(0, 90));
     check(
       '积分缺口合计有数值（数字或 29.5）',
       /\d/.test(memberRows.join(' ')),
@@ -2065,7 +2235,7 @@ async function main() {
         !(await page.getByTestId('one-ct-ek-qr').isVisible()),
     );
 
-    await page.getByTestId('one-ct-ek-studentid').fill('2024109999');
+    await page.getByTestId('one-ct-ek-studentid').fill('2099000009');
     await page.getByTestId('one-ct-ek-password').fill('fake-ek-pw');
     await page.getByTestId('one-ct-unirun-phone').fill('13900001111');
     await page.getByTestId('one-ct-unirun-password').fill('fake-unirun-pw');
@@ -2092,6 +2262,27 @@ async function main() {
       (await page.evaluate(() => window.ctAPI.__fake.callCount('login'))) >= 1,
       `login calls=${await page.evaluate(() => window.ctAPI.__fake.callCount('login'))}`,
     );
+
+    // task-4 补充：新成员可以在弹层里先填「俱乐部（按成员）」→ 保存成员时一起写入成员配置层
+    const newMemberClubDefaults = await page.evaluate(() => {
+      const lat = document.querySelector('[data-testid="one-ct-member-club-fallback-lat"]');
+      const lng = document.querySelector('[data-testid="one-ct-member-club-fallback-lng"]');
+      const allow = document.querySelector('[data-testid="one-ct-member-club-allowothercampus"]');
+      return {
+        section: document.querySelectorAll('[data-testid="one-ct-member-club-section"]').length,
+        lat: lat ? lat.value : null,
+        lng: lng ? lng.value : null,
+        allow: allow ? allow.checked : null,
+      };
+    });
+    check('新成员弹窗有俱乐部小节（坐标空、跨校区默认关）', newMemberClubDefaults.section === 1 && newMemberClubDefaults.lat === '' && newMemberClubDefaults.lng === '' && newMemberClubDefaults.allow === false, JSON.stringify(newMemberClubDefaults));
+    await page.getByTestId('one-ct-member-club-campus').selectOption('航空港');
+    await page.getByTestId('one-ct-member-club-fallback-lat').fill('30.1111');
+    await page.getByTestId('one-ct-member-club-fallback-lat').dispatchEvent('change');
+    await page.getByTestId('one-ct-member-club-fallback-lng').fill('104.1111');
+    await page.getByTestId('one-ct-member-club-fallback-lng').dispatchEvent('change');
+    await page.getByTestId('one-ct-member-club-allowothercampus').check();
+    await page.waitForTimeout(300);
 
     await page.getByTestId('one-ct-member-save').click();
     await page.waitForTimeout(500);
@@ -2129,6 +2320,23 @@ async function main() {
 
     // ── 密码登录被校外限制拒绝：显示服务端原文 + 高亮扫码入口 ──
     const newId = afterAdd.find((m) => m.name === '李四').id;
+    const newMemberClubCfg = await page.evaluate((id) => {
+      const override = JSON.parse(window.localStorage.getItem('1ct:config:' + id) || '{}');
+      return { club: override.club || {}, effective: window.OneCTMembers.effectiveConfig(id).club };
+    }, newId);
+    check(
+      '新成员的俱乐部设置随「保存」一起落盘到 1ct:config:<id>',
+      newMemberClubCfg.club.campusName === '航空港' &&
+        String(newMemberClubCfg.club.fallbackLatitude) === '30.1111' &&
+        String(newMemberClubCfg.club.fallbackLongitude) === '104.1111' &&
+        newMemberClubCfg.club.allowOtherCampus === true,
+      JSON.stringify(newMemberClubCfg.club),
+    );
+    check(
+      '新成员 effectiveConfig 读到自己的俱乐部校区',
+      newMemberClubCfg.effective.campusName === '航空港',
+      JSON.stringify(newMemberClubCfg.effective.campusName),
+    );
     await page.getByTestId('one-ct-member-edit-' + newId).click();
     await page.getByTestId('one-ct-member-modal').waitFor({ state: 'visible' });
     await page.getByTestId('one-ct-ek-mode-password').click();
@@ -2183,7 +2391,7 @@ async function main() {
       JSESSIONID: 'FAKE-SESSION-JSON',
       access_token: 'fake-json-access-token',
       refresh_token: 'fake-json-refresh-token',
-      user_info: { loginName: '2024109999', userName: '李四' },
+      user_info: { loginName: '2099000009', userName: '李四' },
     });
     await page.getByTestId('one-ct-ek-session-json').fill(sessionJson);
     await page.getByTestId('one-ct-ek-session-import').click();
@@ -2306,6 +2514,98 @@ async function main() {
       `rows=${await page.locator('[data-testid="one-ct-sync-gap-row"]').count()}`,
     );
     shots.push(await screenshot(page, '1ct-sync-03-modal-fail-keeps.png'));
+    await page.getByTestId('one-ct-member-cancel').click();
+    await page.waitForTimeout(250);
+
+    // ── task-4 补充：俱乐部校区/签到点坐标「按成员覆盖」（一台电脑可能跑多个校区的同学） ──
+    await page.getByTestId('one-ct-member-edit-' + newId).click();
+    await page.getByTestId('one-ct-member-modal').waitFor({ state: 'visible' });
+    check(
+      '成员弹窗有「俱乐部（按成员）」小节',
+      (await page.getByTestId('one-ct-member-club-section').count()) === 1,
+      `count=${await page.getByTestId('one-ct-member-club-section').count()}`,
+    );
+    const memberClubInit = await page.evaluate(() => {
+      const campus = document.querySelector('[data-testid="one-ct-member-club-campus"]');
+      const lat = document.querySelector('[data-testid="one-ct-member-club-fallback-lat"]');
+      const lng = document.querySelector('[data-testid="one-ct-member-club-fallback-lng"]');
+      const allow = document.querySelector('[data-testid="one-ct-member-club-allowothercampus"]');
+      return {
+        campusTag: campus ? campus.tagName : null,
+        campusValue: campus ? campus.value : null,
+        options: campus ? Array.from(campus.options).map((opt) => opt.textContent.trim()) : [],
+        lat: lat ? lat.value : null,
+        lng: lng ? lng.value : null,
+        allow: allow ? allow.checked : null,
+      };
+    });
+    check(
+      '成员弹窗校区是下拉（不筛选 / 航空港 / 龙泉）',
+      memberClubInit.campusTag === 'SELECT' && memberClubInit.options.join(',') === '不筛选,航空港,龙泉',
+      JSON.stringify(memberClubInit),
+    );
+    check(
+      '成员弹窗初值来自该成员的生效配置（不是全局默认）',
+      memberClubInit.campusValue === '航空港' &&
+        memberClubInit.lat === '30.1111' &&
+        memberClubInit.lng === '104.1111' &&
+        memberClubInit.allow === true,
+      JSON.stringify(memberClubInit),
+    );
+
+    // 给这位成员设成龙泉 + 签到点坐标 → 只写 1ct:config:<id>，不动全局
+    await page.getByTestId('one-ct-member-club-allowothercampus').uncheck();
+    await page.waitForTimeout(200);
+    const allowOff = await page.evaluate((id) => {
+      const override = JSON.parse(window.localStorage.getItem('1ct:config:' + id) || '{}');
+      return override.club ? override.club.allowOtherCampus : null;
+    }, newId);
+    check('成员层关闭「允许跨校区」立刻落盘 false', allowOff === false, JSON.stringify(allowOff));
+    await page.getByTestId('one-ct-member-club-campus').selectOption('龙泉');
+    await page.waitForTimeout(250);
+    await page.getByTestId('one-ct-member-club-fallback-lat').fill('30.5678');
+    await page.getByTestId('one-ct-member-club-fallback-lat').dispatchEvent('change');
+    await page.getByTestId('one-ct-member-club-fallback-lng').fill('104.2345');
+    await page.getByTestId('one-ct-member-club-fallback-lng').dispatchEvent('change');
+    await page.getByTestId('one-ct-member-club-allowothercampus').check();
+    await page.waitForTimeout(400);
+    const memberClubCfg = await page.evaluate((id) => {
+      const memberOverride = JSON.parse(window.localStorage.getItem('1ct:config:' + id) || '{}');
+      const globalCfg = JSON.parse(window.localStorage.getItem('1ct:config:global') || '{}');
+      return {
+        override: memberOverride.club || {},
+        global: globalCfg.club || {},
+        effectiveSelf: window.OneCTMembers.effectiveConfig(id).club,
+        effectiveOther: window.OneCTMembers.effectiveConfig('m_zhangsan').club,
+      };
+    }, newId);
+    check(
+      '成员设置写到 1ct:config:<id>.club.campusName',
+      memberClubCfg.override.campusName === '龙泉',
+      JSON.stringify(memberClubCfg.override.campusName),
+    );
+    check(
+      '成员设置写到 club.fallbackLatitude / fallbackLongitude',
+      String(memberClubCfg.override.fallbackLatitude) === '30.5678' &&
+        String(memberClubCfg.override.fallbackLongitude) === '104.2345',
+      JSON.stringify({ lat: memberClubCfg.override.fallbackLatitude, lng: memberClubCfg.override.fallbackLongitude }),
+    );
+    check(
+      '成员设置写到 club.allowOtherCampus',
+      memberClubCfg.override.allowOtherCampus === true,
+      JSON.stringify(memberClubCfg.override.allowOtherCampus),
+    );
+    check('全局层没有被成员设置写穿', !memberClubCfg.global.campusName, JSON.stringify(memberClubCfg.global.campusName));
+    check(
+      'effectiveConfig(该成员).club.campusName = 龙泉',
+      memberClubCfg.effectiveSelf.campusName === '龙泉',
+      JSON.stringify(memberClubCfg.effectiveSelf.campusName),
+    );
+    check(
+      '同机其他成员仍是全局值（互不影响）',
+      memberClubCfg.effectiveOther.campusName === '',
+      JSON.stringify(memberClubCfg.effectiveOther.campusName),
+    );
     await page.getByTestId('one-ct-member-cancel').click();
     await page.waitForTimeout(250);
 
@@ -3081,7 +3381,7 @@ async function main() {
     );
     check(
       'loginEk 使用成员 ekCredentials 的学号（不把密码写进 DOM/日志）',
-      repairLoginCalls.some((c) => c.student_id === '2024101164' && c.hasPassword === true) &&
+      repairLoginCalls.some((c) => c.student_id === '2099000001' && c.hasPassword === true) &&
         !/fake-pw/.test(await readAppliedNote()) &&
         !(await page.getByTestId('one-ct-ek-view').innerHTML()).includes('fake-pw'),
       JSON.stringify(repairLoginCalls),
@@ -3149,7 +3449,7 @@ async function main() {
           JSESSIONID: 'fake-jsession-official-only',
           access_token: 'fake-access-token',
           refresh_token: 'fake-refresh-token',
-          user_info: { loginName: '2024101188', userName: '仅官方已报名' },
+          user_info: { loginName: '2099000008', userName: '仅官方已报名' },
         },
         ekStatus: 'ok',
       });
@@ -3663,12 +3963,12 @@ async function main() {
       const yesterday = dayOf(new Date(Date.now() - 86400000));
       const now = Date.now();
       const state = {
-        done: { [today + '|2024101164|ek|act-1|signIn']: now - 4 * 3600000 },
-        inflight: { [today + '|2024101164|ek|act-1|signOut']: now - 60 * 1000 },
+        done: { [today + '|2099000001|ek|act-1|signIn']: now - 4 * 3600000 },
+        inflight: { [today + '|2099000001|ek|act-1|signOut']: now - 60 * 1000 },
         failed: {
-          [today + '|2024101164|ek|act-2|signIn']: { status: 'failed', at: now - 3 * 3600000 },
-          [today + '|2024101164|unirun|daily|autoRun']: { status: 'unknown', at: now - 2 * 3600000 },
-          [yesterday + '|2024101164|ek|act-5|signIn']: { status: 'failed', at: now - 30 * 3600000 },
+          [today + '|2099000001|ek|act-2|signIn']: { status: 'failed', at: now - 3 * 3600000 },
+          [today + '|2099000001|unirun|daily|autoRun']: { status: 'unknown', at: now - 2 * 3600000 },
+          [yesterday + '|2099000001|ek|act-5|signIn']: { status: 'failed', at: now - 30 * 3600000 },
         },
         daily: {},
         qrChecks: {},
@@ -3808,6 +4108,73 @@ async function main() {
       JSON.stringify(failedCell),
     );
     shots.push(await screenshot(page, '1ct-records-02-failed.png'));
+
+    // ── task-4：waiting-material 里的「签不上」原因也要进失败记录（中文文案） ──
+    // 龙泉校区签不上的现场：结果是 waiting-material + need-coords / other-campus 等，
+    // 旧口径只收 failed/unknown → 用户看不到任何原因（静默空转）。
+    const waitingSeed = await page.evaluate(() => {
+      const pad = (n) => String(n).padStart(2, '0');
+      const d = new Date();
+      const today = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      const raw = JSON.parse(window.localStorage.getItem('1ct:results') || '{}');
+      raw.events = Array.isArray(raw.events) ? raw.events : [];
+      const now = Date.now();
+      const seeds = [
+        ['need-coords', 'club-need-coords', '龙泉校区篮球赛'],
+        ['missing-date', 'club-missing-date', '龙泉校区晨跑'],
+        ['other-campus', 'club-other-campus', '体能锻炼（航空港）'],
+        ['club-attempts-exhausted', 'club-attempts', '龙泉校区讲座'],
+        // 反例：其他 waiting-material 原因（未配置关键词）不属于「签不上」，不应进失败记录
+        ['need-keywords', 'club-need-keywords', '龙泉校区志愿服务'],
+      ];
+      seeds.forEach(([reason, activityId, activityName], index) => {
+        raw.events.push({
+          key: 'waiting|club|signIn|' + activityId + '|m_zhangsan',
+          at: now + 1000 + index * 100,
+          day: today,
+          memberId: 'm_zhangsan',
+          memberName: '张三',
+          module: 'club',
+          action: 'signIn',
+          activityId,
+          activityName,
+          status: 'waiting-material',
+          reason,
+          preview: false,
+          dryRun: false,
+        });
+      });
+      window.localStorage.setItem('1ct:results', JSON.stringify(raw));
+      return seeds.map((row) => row[0]);
+    });
+    await page.reload({ waitUntil: 'load' });
+    await waitReady(page);
+    await page.getByTestId('one-ct-tab-records').click();
+    await page.waitForTimeout(500);
+    const failedRowsText = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="one-ct-records-failed-row"]'))
+        .map((row) => row.textContent.replace(/\s+/g, ' ').trim())
+        .join(' | '),
+    );
+    check('失败记录纳入 waiting-material：need-coords 显示中文原因', /缺少定位坐标/.test(failedRowsText), failedRowsText.slice(0, 200));
+    check('失败记录纳入 waiting-material：missing-date 显示中文原因', /缺少日期/.test(failedRowsText), failedRowsText.slice(0, 200));
+    check('失败记录纳入 waiting-material：other-campus 显示中文原因', /跨校区/.test(failedRowsText), failedRowsText.slice(0, 200));
+    check(
+      '失败记录纳入 waiting-material：club-attempts-exhausted 显示中文原因',
+      /重试次数用尽/.test(failedRowsText),
+      failedRowsText.slice(0, 200),
+    );
+    check(
+      '等待材料行带活动名（不再静默空转）',
+      /龙泉校区篮球赛/.test(failedRowsText),
+      failedRowsText.slice(0, 200),
+    );
+    check(
+      'waiting-material 里与「签不上」无关的原因不被误收（未配置关键词不进失败记录）',
+      !/未配置关键词/.test(failedRowsText) && !/龙泉校区志愿服务/.test(failedRowsText),
+      failedRowsText.slice(0, 200),
+    );
+    info('等待材料失败记录种子', waitingSeed.join(','));
 
     // 失败原因（detail）：日志页同样可见，且 hover 有全文、不泄露凭据
     await page.getByTestId('one-ct-tab-logs').click();
@@ -4007,6 +4374,402 @@ async function main() {
       '全新机器没有旧默认值时不会误写 06:30',
       !cfgFresh.unirun || cfgFresh.unirun.runAt === undefined || cfgFresh.unirun.runAt === '19:00',
       JSON.stringify(cfgFresh.unirun),
+    );
+
+    // ── 真实执行模式必须落盘（校园跑）：UI 已下线预览，引擎 DEFAULTS.dryRun=true 只是安全默认 ──
+    // 若渲染层不把 dryRun=false 落到 1ct:config:global，引擎收到的有效配置仍是预览，
+    // 校园跑只会产出 dry-run/preview-only，api.unirun.autoRun 永远不会被调用。
+    async function readGlobalRawConfig() {
+      return page.evaluate(() => JSON.parse(window.localStorage.getItem('1ct:config:global') || 'null'));
+    }
+    async function writeGlobalConfigAndReload(patch) {
+      await page.evaluate((p) => {
+        const raw = JSON.parse(localStorage.getItem('1ct:config:global') || '{}');
+        localStorage.setItem('1ct:config:global', JSON.stringify(Object.assign({}, raw, p)));
+        Object.keys(localStorage)
+          .filter((k) => k.indexOf('1ct:state:') === 0)
+          .forEach((k) => localStorage.removeItem(k));
+      }, patch);
+      await page.reload({ waitUntil: 'load' });
+      await waitReady(page);
+    }
+    // 保证「当前一定在校园跑窗口内」：runAt = 北京时间当前时刻回退 5 分钟
+    function beijingRunAtInsideWindow() {
+      const minuteOfDay = Math.floor(Date.now() / 60000 + 480) % 1440;
+      const start = Math.max(0, minuteOfDay - 5);
+      const hh = String(Math.floor(start / 60)).padStart(2, '0');
+      const mm = String(start % 60).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+    // 直接跑一轮真实链路（members.runAll → createEngine → planUnirun → api.unirun.autoRun）
+    async function runOneRoundThroughMembers() {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const out = await page.evaluate(async () => {
+          window.ctAPI.__fake.reset();
+          const result = await window.OneCTMembers.runAll({
+            api: window.ctAPI,
+            logger: { log: function () {} },
+          });
+          return {
+            busy: result.busy === true,
+            autoRunCalls: window.ctAPI.__fake.calls.filter(
+              (c) => c.module === 'unirun' && c.name === 'autoRun',
+            ).length,
+            lastAutoRun: (function () {
+              const hits = window.ctAPI.__fake.calls.filter(
+                (c) => c.module === 'unirun' && c.name === 'autoRun',
+              );
+              return hits.length ? hits[hits.length - 1].payload : null;
+            })(),
+            unirunRows: (result.results || [])
+              .filter((r) => r.module === 'unirun')
+              .map((r) => ({ status: r.status, reason: r.reason, detail: r.detail })),
+          };
+        });
+        if (!out.busy) return out;
+        await page.waitForTimeout(3000);
+      }
+      return { busy: true, autoRunCalls: -1, unirunRows: [] };
+    }
+
+    // 场景 1：全新机器（没有 1ct:config:global）→ 真实执行模式必须落盘
+    await page.evaluate(() => window.localStorage.removeItem('1ct:config:global'));
+    await page.reload({ waitUntil: 'load' });
+    await waitReady(page);
+    const freshGlobal = await readGlobalRawConfig();
+    check(
+      '全新机器启动后把 dryRun=false 落到 1ct:config:global（真实执行）',
+      Boolean(freshGlobal) && freshGlobal.dryRun === false,
+      JSON.stringify({ hasGlobal: Boolean(freshGlobal), dryRun: freshGlobal && freshGlobal.dryRun }),
+    );
+
+    // 场景 2：历史机器（有 unirun.enabled、没有 dryRun 键、迁移标记已打过）→ 必须补写真实执行
+    const insideWindowRunAt = beijingRunAtInsideWindow();
+    await writeGlobalConfigAndReload({
+      unirun: { enabled: true, runAt: insideWindowRunAt, windowMinutes: 60, runDistance: null, runTime: null },
+      migrations: { previewOffV1: true, unirunAutoV2: true, unirunRunAtV1: true },
+    });
+    const historicalGlobal = await readGlobalRawConfig();
+    check(
+      '历史配置缺 dryRun 键时启动补写 dryRun=false',
+      Boolean(historicalGlobal) && historicalGlobal.dryRun === false,
+      JSON.stringify({ dryRun: historicalGlobal && historicalGlobal.dryRun }),
+    );
+    const historicalRun = await runOneRoundThroughMembers();
+    check(
+      '历史配置（缺 dryRun 键）下校园跑真的提交（两名启用成员各提交一次）',
+      historicalRun.autoRunCalls >= 1 && historicalRun.autoRunCalls === historicalRun.unirunRows.length,
+      JSON.stringify(historicalRun),
+    );
+    check(
+      '历史配置下校园跑结果是 success 而不是 dry-run',
+      historicalRun.unirunRows.length > 0 &&
+        historicalRun.unirunRows.every((r) => r.status === 'success'),
+      JSON.stringify(historicalRun.unirunRows),
+    );
+
+    // 场景 3：外部把 dryRun 改回 true（含迁移标记已打过）→ 重启后仍必须是真实执行
+    await writeGlobalConfigAndReload({ dryRun: true });
+    const forcedPreviewGlobal = await readGlobalRawConfig();
+    check(
+      '外部写回 dryRun=true 后重启仍落盘为 false（真实执行不被静默恢复成预览）',
+      Boolean(forcedPreviewGlobal) && forcedPreviewGlobal.dryRun === false,
+      JSON.stringify({ dryRun: forcedPreviewGlobal && forcedPreviewGlobal.dryRun }),
+    );
+    const forcedRun = await runOneRoundThroughMembers();
+    check(
+      'dryRun 被外部写回 true 后校园跑仍真的提交（每名启用成员各提交一次）',
+      forcedRun.autoRunCalls >= 1 && forcedRun.autoRunCalls === forcedRun.unirunRows.length,
+      JSON.stringify(forcedRun),
+    );
+
+    // 边界断言：成员生效配置（= 引擎实际收到的 config）必须是真实执行
+    const effective = await page.evaluate(() => {
+      const cfg = window.OneCTMembers.effectiveConfig('m_zhangsan');
+      const globalCfg = window.OneCTMembers.effectiveConfig(null);
+      return {
+        memberDryRun: cfg.dryRun,
+        globalDryRun: globalCfg.dryRun,
+        unirunEnabled: Boolean(cfg.unirun && cfg.unirun.enabled),
+        hasPhone: Boolean(cfg.unirun && cfg.unirun.phone),
+      };
+    });
+    check(
+      '成员生效配置（引擎实际输入）dryRun=false 且校园跑开关为开',
+      effective.memberDryRun === false && effective.globalDryRun === false && effective.unirunEnabled === true,
+      JSON.stringify(effective),
+    );
+
+    // 回归：安全契约仍在 —— 引擎 DEFAULTS.dryRun 仍是 true（预览必须显式选择，不会因缺省而真实提交）
+    const defaultsDryRun = await page.evaluate(() => {
+      const mod = window.Auto3CTAutomation;
+      return mod && mod.DEFAULTS ? mod.DEFAULTS.dryRun : 'missing';
+    });
+    check('引擎默认 dryRun 仍为 true（安全底线未被削弱）', defaultsDryRun === true, String(defaultsDryRun));
+    // 回归：成员层仍然拒绝写 dryRun（预览开关全局唯一）
+    const memberDryRunRejected = await page.evaluate(() =>
+      window.OneCTMembers.saveConfig('m_zhangsan', { dryRun: true }),
+    );
+    check(
+      '成员层写 dryRun 仍被拒绝（dryRun-global-only）',
+      Boolean(memberDryRunRejected) && memberDryRunRejected.rejected === 'dryRun-global-only',
+      JSON.stringify(memberDryRunRejected),
+    );
+
+    // ── 校园跑校区：本地库为空 → 每轮 no-campus、0 次 POST（本机 1.2.2 真实复现） ──
+    // 修复目标：卡片里能选校区（云端清单 → 用户选 → 下载 → 重读确认 → 才写 campusId），选好后同一轮就能真提交。
+    async function reopenRunCard() {
+      await page.evaluate(() => window.OneCTShell.switchTab('records'));
+      await page.evaluate(() => window.OneCTShell.switchTab('run'));
+      await page.waitForTimeout(200);
+    }
+    async function campusCard() {
+      return page.evaluate(() => {
+        const q = (id) => document.querySelector('[data-testid="' + id + '"]');
+        const txt = (id) => {
+          const node = q(id);
+          return node ? node.textContent : null;
+        };
+        return {
+          empty: Boolean(q('one-ct-unirun-campus-empty')),
+          current: txt('one-ct-unirun-campus-current'),
+          error: txt('one-ct-unirun-campus-error'),
+          busy: Boolean(q('one-ct-unirun-campus-busy')),
+          memberMissing: txt('one-ct-unirun-campus-member-missing'),
+          memberScope: txt('one-ct-unirun-campus-member-scope'),
+          paramsText: txt('one-ct-unirun-params-text'),
+          hasCloudSelect: Boolean(q('one-ct-unirun-campus-cloud-select')),
+          hasCloud: Boolean(q('one-ct-unirun-campus-cloud')),
+          hasLocalSelect: Boolean(q('one-ct-unirun-campus-select')),
+        };
+      });
+    }
+    const readCampusId = () =>
+      page.evaluate(() => {
+        const raw = JSON.parse(localStorage.getItem('1ct:config:global') || '{}');
+        return raw.unirun && raw.unirun.campusId !== undefined ? raw.unirun.campusId : null;
+      });
+
+    // 1) 本地库为空：必须明确提示，且不能凭空写 campusId
+    await page.evaluate(() => {
+      window.__ONE_CT_FAKE_CAMPUS__.setLocal([]);
+      window.__ONE_CT_FAKE_CAMPUS__.resetCounts();
+      window.OneCTMembers.saveGlobalConfig({ unirun: { campusId: null } });
+    });
+    await reopenRunCard();
+    const emptyCard = await campusCard();
+    check('本机没有校区数据时，卡片提示必须先选校区', emptyCard.empty === true, JSON.stringify(emptyCard));
+    check('本机空库时不会凭空写 campusId', (await readCampusId()) === null, String(await readCampusId()));
+
+    // 2) 只列云端清单：不替用户选、不下载、不写设置
+    await page.getByTestId('one-ct-unirun-campus-cloud').click();
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('[data-testid="one-ct-unirun-campus-cloud-select"]')),
+      { timeout: 15000 },
+    );
+    const cloudCounts = await page.evaluate(() => window.__ONE_CT_FAKE_CAMPUS__.counts());
+    check('点「从云端获取校区列表」后出现可选校区', (await campusCard()).hasCloudSelect === true);
+    check(
+      '只列清单：没有下载、也没有写 campusId',
+      cloudCounts.pull === 0 && (await readCampusId()) === null,
+      JSON.stringify(cloudCounts),
+    );
+
+    // 3) 选 campus-2 → 下载并保存 → 重读确认 → 才写 campusId
+    await page.getByTestId('one-ct-unirun-campus-cloud-select').selectOption('campus-2');
+    await page.getByTestId('one-ct-unirun-campus-pull').click();
+    await page.waitForFunction(
+      () => {
+        const node = document.querySelector('[data-testid="one-ct-unirun-campus-current"]');
+        return Boolean(node) && node.textContent.indexOf('分校区') >= 0;
+      },
+      { timeout: 20000 },
+    );
+    const pullCounts = await page.evaluate(() => window.__ONE_CT_FAKE_CAMPUS__.counts());
+    check('下载并保存后写入 campusId=campus-2', (await readCampusId()) === 'campus-2', String(await readCampusId()));
+    check('下载后重新读本地库确认（local ≥ 2 次）', pullCounts.local >= 2, JSON.stringify(pullCounts));
+    check(
+      '卡片显示当前校区',
+      /分校区/.test((await campusCard()).current || ''),
+      String((await campusCard()).current),
+    );
+
+    // 4) 全链：选好校区后同一轮 autoRun 必须带该本地校区的 mapName/schoolSiteIndex
+    // 先清掉当天 done 状态，否则引擎会按「今天已完成」跳过、根本不发请求（与校区无关）
+    await page.evaluate(() => {
+      Object.keys(localStorage)
+        .filter((k) => k.indexOf('1ct:state:') === 0)
+        .forEach((k) => localStorage.removeItem(k));
+    });
+    const campusRun = await runOneRoundThroughMembers();
+    check(
+      '选好校区后同一轮真的提交，且用该校区的 mapName/schoolSiteIndex',
+      campusRun.autoRunCalls >= 1 &&
+        Boolean(campusRun.lastAutoRun) &&
+        campusRun.lastAutoRun.mapName === 'branch' &&
+        Number(campusRun.lastAutoRun.schoolSiteIndex) === 1,
+      JSON.stringify({ calls: campusRun.autoRunCalls, payload: campusRun.lastAutoRun }),
+    );
+
+    // 5) 负例：下载返回成功但库里没有 → 不写 campusId、错误可见、可重试
+    await page.evaluate(() => {
+      window.__ONE_CT_FAKE_CAMPUS__.setLocal([]);
+      window.__ONE_CT_FAKE_CAMPUS__.setPullMode('noop');
+    });
+    await reopenRunCard();
+    await page.getByTestId('one-ct-unirun-campus-cloud').click();
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('[data-testid="one-ct-unirun-campus-cloud-select"]')),
+      { timeout: 15000 },
+    );
+    await page.getByTestId('one-ct-unirun-campus-cloud-select').selectOption('campus-1');
+    await page.getByTestId('one-ct-unirun-campus-pull').click();
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('[data-testid="one-ct-unirun-campus-error"]')),
+      { timeout: 20000 },
+    );
+    const noopCard = await campusCard();
+    check(
+      '下载返回成功但库里没有该校区：不写 campusId、错误可见、busy 已清',
+      (await readCampusId()) === 'campus-2' && /没有这个校区/.test(noopCard.error || '') && noopCard.busy === false,
+      JSON.stringify(noopCard),
+    );
+
+    // 6) 负例：云端清单失败 → 中文错误可重试、busy 清空
+    await page.evaluate(() => {
+      window.__ONE_CT_FAKE_CAMPUS__.setLocal([]);
+      window.__ONE_CT_FAKE_CAMPUS__.setCloudMode('fail');
+      window.__ONE_CT_FAKE_CAMPUS__.setPullMode('ok');
+    });
+    await reopenRunCard();
+    await page.getByTestId('one-ct-unirun-campus-cloud').click();
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('[data-testid="one-ct-unirun-campus-error"]')),
+      { timeout: 20000 },
+    );
+    const cloudFailCard = await campusCard();
+    check(
+      '云端清单失败：中文错误可再点一次重试、busy 已清',
+      /可再点一次重试/.test(cloudFailCard.error || '') && cloudFailCard.busy === false,
+      JSON.stringify(cloudFailCard),
+    );
+
+    // 7) 负例：读本地库失败 → 保留「读取本地校区失败」，不能被「还没下载」覆盖
+    await page.evaluate(() => {
+      window.__ONE_CT_FAKE_CAMPUS__.setCloudMode('ok');
+      window.__ONE_CT_FAKE_CAMPUS__.setLocal([
+        { id: 'campus-1', label: '主校区', mapName: 'main', schoolSiteIndex: 0, updatedAt: Date.now() },
+      ]);
+    });
+    await reopenRunCard();
+    await page.evaluate(() => window.__ONE_CT_FAKE_CAMPUS__.setLocalMode('fail'));
+    await page.getByTestId('one-ct-unirun-campus-save').click();
+    await page.waitForFunction(
+      () => {
+        const node = document.querySelector('[data-testid="one-ct-unirun-campus-error"]');
+        return Boolean(node) && node.textContent.indexOf('读取本地校区失败') >= 0;
+      },
+      { timeout: 20000 },
+    );
+    const localFailCard = await campusCard();
+    check(
+      '读取本地库失败：保留真实原因（读取本地校区失败），不被「还没下载」覆盖',
+      /读取本地校区失败/.test(localFailCard.error || '') && !/还没下载/.test(localFailCard.error || ''),
+      JSON.stringify(localFailCard),
+    );
+    await page.evaluate(() => window.__ONE_CT_FAKE_CAMPUS__.setLocalMode('ok'));
+
+    // 8) 成员级覆盖：只有与全局不同的成员才提示（effectiveConfig 已含全局，不能直接当成员覆盖）
+    await page.evaluate(() => {
+      window.__ONE_CT_FAKE_CAMPUS__.setLocal([
+        { id: 'campus-1', label: '主校区', mapName: 'main', schoolSiteIndex: 0, updatedAt: Date.now() },
+        { id: 'campus-2', label: '分校区', mapName: 'branch', schoolSiteIndex: 1, updatedAt: Date.now() },
+      ]);
+      window.OneCTMembers.saveGlobalConfig({ unirun: { campusId: 'campus-1' } });
+      window.OneCTMembers.saveConfig('m_zhangsan', { unirun: { campusId: 'campus-2' } });
+      window.OneCTMembers.saveConfig('m_wangwu', { unirun: { campusId: 'campus-gone' } });
+    });
+    await reopenRunCard();
+    const overrideCard = await campusCard();
+    check(
+      '只有与全局不同的成员才被报成成员级覆盖（不误标没有覆盖的成员）',
+      /张三/.test(overrideCard.memberScope || '') && !/王五/.test(overrideCard.memberScope || ''),
+      JSON.stringify(overrideCard),
+    );
+    check(
+      '成员指向本机没有的校区时中文点名该成员',
+      /王五/.test(overrideCard.memberMissing || ''),
+      String(overrideCard.memberMissing),
+    );
+    const overrideEffective = await page.evaluate(() => ({
+      zhangsan: window.OneCTMembers.effectiveConfig('m_zhangsan').unirun.campusId,
+      global: window.OneCTMembers.effectiveConfig(null).unirun.campusId,
+    }));
+    check(
+      '全局保存不覆盖成员显式 campusId',
+      overrideEffective.zhangsan === 'campus-2' && overrideEffective.global === 'campus-1',
+      JSON.stringify(overrideEffective),
+    );
+    // 原「成员」页没有校园跑校区控件，所以必须给用户一个能点的入口，而不是只提示去改
+    check(
+      '本机已有校区时仍能看到云端入口（不会被单个本地校区锁死）',
+      overrideCard.hasCloud === true && overrideCard.hasLocalSelect === true,
+      JSON.stringify(overrideCard),
+    );
+    await page.getByTestId('one-ct-unirun-campus-member-global-m_wangwu').click();
+    await page.waitForFunction(
+      () => {
+        const raw = JSON.parse(localStorage.getItem('1ct:config:m_wangwu') || '{}');
+        const u = raw.unirun || {};
+        return u.campusId === 'campus-1';
+      },
+      { timeout: 15000 },
+    );
+    const afterUseGlobal = await page.evaluate(() => {
+      const raw = JSON.parse(localStorage.getItem('1ct:config:m_wangwu') || '{}');
+      return {
+        campusId: (raw.unirun || {}).campusId,
+        effective: window.OneCTMembers.effectiveConfig('m_wangwu').unirun.campusId,
+      };
+    });
+    check(
+      '点「改用当前全局校区」后成员写入当前全局校区 id（不是 null —— null 会被 deepMerge 覆盖成空、引擎再自动取第一个）',
+      afterUseGlobal.campusId === 'campus-1' && afterUseGlobal.effective === 'campus-1',
+      JSON.stringify(afterUseGlobal),
+    );
+    const afterUseGlobalCard = await campusCard();
+    check(
+      '改用全局后成员不再被报成缺失覆盖',
+      !/王五/.test(afterUseGlobalCard.memberMissing || ''),
+      String(afterUseGlobalCard.memberMissing),
+    );
+
+    // 9) 手填参数（1100 米/35 分钟）→ 说明官方客户端只接受 7–16 分钟 + 一键恢复
+    await page.evaluate(() => window.OneCTMembers.saveGlobalConfig({ unirun: { runDistance: 1100, runTime: 35 } }));
+    await reopenRunCard();
+    const paramCard = await campusCard();
+    check(
+      '手填 1100 米/35 分钟时卡片说明官方客户端只接受 7–16 分钟',
+      /7–16 分钟/.test(paramCard.paramsText || ''),
+      String(paramCard.paramsText),
+    );
+    await page.getByTestId('one-ct-unirun-params-reset').click();
+    await page.waitForFunction(
+      () => {
+        const raw = JSON.parse(localStorage.getItem('1ct:config:global') || '{}');
+        const u = raw.unirun || {};
+        return u.runDistance == null && u.runTime == null;
+      },
+      { timeout: 15000 },
+    );
+    const paramsCleared = await page.evaluate(() => {
+      const raw = JSON.parse(localStorage.getItem('1ct:config:global') || '{}');
+      return { runDistance: raw.unirun && raw.unirun.runDistance, runTime: raw.unirun && raw.unirun.runTime };
+    });
+    check(
+      '点「恢复自动合法参数」后清掉显式里程/时长（用户点了才改）',
+      paramsCleared.runDistance == null && paramsCleared.runTime == null,
+      JSON.stringify(paramsCleared),
     );
 
     // ── 全局约束 ──

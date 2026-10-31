@@ -2,14 +2,14 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.2.1';
+  var APP_VERSION = '1.2.3';
   // 本版更新公告（按版本只弹一次，用户可见文案）
   var CHANGELOG = [
-    '签到失败会自动重试（默认每 2 分钟一次、最多 3 次），不再一次被拒就锁死一整天',
-    '失败原因会写在日志和记录里，能直接看到学校返回的说明',
-    '新增「清除今日失败锁定」，想立刻再试一次时不用等明天',
-    '俱乐部签到窗口放宽到 15 分钟（可配置），坐标只回传学校下发的签到点，避免记到别的校区',
-    '去掉预览开关，启动即真实执行；微信扫码登录、首次引导继续保留',
+    '修复「校园跑设了时间从来不会提交」：新增「跑步校区」选择。本机没有校区数据时，每轮只会停在「未选择校区」，一次都不会提交——现在可以从云端选一个校区下载到本机（选好才写设置，不会替你挑）',
+    '校园跑里程/时长改为按官方客户端要求的 4–10 km/h 自动匹配；以前手填的 1100 米/35 分钟这类组合（1.9 km/h）超出该要求，现在会被拦截并提示调整，卡片里给「恢复自动合法参数」按钮，点了才改',
+    '真实执行模式现在会写进本机设置：以前只在界面上显示「真实执行」，后台仍按预览跑，校园跑/俱乐部/二课都只留预览记录、不会真提交',
+    '失败原因补齐中文：未选校区、没配校园跑账号、需要重新登录、参数不合法、配速超出 4–10 km/h 都会在「记录」里直接说明怎么办',
+    '俱乐部签到沿用上一版修复（龙泉/航空港缺坐标可在卡片或成员页填签到点坐标）；「清除今日失败锁定」仍会一并清掉俱乐部的重试次数',
   ];
 
   var UI_KEY = '1ct:ui';
@@ -48,6 +48,8 @@
     club: {
       enabled: false, keywords: [], allowAll: false, join: true,
       signIn: true, signOut: true, dailyJoinLimit: 1,
+      // 校区筛选 / 签到点坐标兜底 / 跨校区放行（'' / '' / false = 旧行为）
+      campusName: '', fallbackLatitude: '', fallbackLongitude: '', allowOtherCampus: false,
     },
     ek: {
       enabled: false, keywords: [], allowAll: false, apply: true,
@@ -91,11 +93,20 @@
     'no-candidate': '未发现候选活动', 'api-unavailable': '接口不可用',
     'ek-not-logged-in': '二课未登录', 'no-ek-session': '二课未登录',
     'no-unirun-account': '未配置校园跑账号', 'campus-not-found': '未找到校区',
+    'no-campus': '未选择跑步校区（请在「校园跑」卡片里选校区）',
+    'invalid-run-params': '跑步参数不合法（里程/时长超出允许范围）',
+    'pace-out-of-range': '配速超出官方客户端要求的 4–10 km/h（已拦截，请调整里程或时长）',
     'apply-state-unknown': '报名状态待确认', 'apply-disabled': '自动报名已关闭',
     'unexpected-list-shape': '活动列表结构异常', 'scan-complete': '扫描完成',
     'preview-only': '预览（历史，未提交）', 'not-applied': '未报名',
     'member-error': '该成员执行异常', 'ek-session-expired': '二课会话已过期',
     'ek-login-failed': '二课重新登录失败', 'no-api': '本机服务不可用',
+    // 俱乐部「签不上」的可解释原因（引擎 side 新增口径，务必给中文，别让用户看英文码）
+    'missing-date': '活动缺少日期（无法去重）', 'missing-activity-id': '活动缺少编号',
+    'other-campus': '跨校区，已跳过（可改校区或允许跨校区）',
+    'club-retry-pending': '俱乐部签到重试等待中',
+    'club-attempts-exhausted': '俱乐部重试次数用尽（可清除今日失败锁定再试）',
+    'already-signed-in-upstream': '上游显示已签到', 'already-signed-out-upstream': '上游显示已签退',
   };
 
   // ───────────────────────────── 通用工具 ─────────────────────────────
@@ -349,6 +360,9 @@
     lastSummary: ui.lastSummary,
   };
   var logs = [];
+  // 关键设置没写进本机存储时的「暂停本轮」原因。只有真正需要落盘的迁移失败才会置位，
+  // 且只影响自动运行（不拦手点、不影响其它模块写入），避免用户以为在跑其实每天空跑。
+  var storageGate = '';
   var logRenderPending = false;
   var timer = null;
   var config = deepMerge(fallbackConfig(), {});
@@ -789,6 +803,7 @@
     if (!cfgBool('ek.enabled') && !cfgBool('unirun.enabled') && !cfgBool('club.enabled')) {
       blockers.push('没有启用任何业务模块');
     }
+    if (storageGate) blockers.push(storageGate);
     return blockers.join('；');
   }
 
@@ -1034,16 +1049,20 @@
 
   /** 今天还有多少项失败锁定（只读，不动存储）：用于按钮禁用判断与提示文案。 */
   function todayFailedLocks() {
-    if (!hasFn(M, 'clearFailedLocks')) return { count: 0, available: false, members: [] };
+    if (!hasFn(M, 'clearFailedLocks')) return { count: 0, clubCount: 0, available: false, members: [] };
     try {
       var result = M.clearFailedLocks({ dryRun: true });
+      var clubCount = num(result && result.clubCleared, 0) || 0;
       return {
-        count: num(result && result.cleared, 0) || 0,
+        // 俱乐部重试计数也算「今天被锁住的东西」：只统计 failed 会让按钮在
+        // 「只剩 club-attempts-exhausted」时变成禁用，用户点不了就永远清不掉。
+        count: (num(result && result.cleared, 0) || 0) + clubCount,
+        clubCount: clubCount,
         available: true,
         members: (result && result.members) || [],
       };
     } catch (e) {
-      return { count: 0, available: false, members: [] };
+      return { count: 0, clubCount: 0, available: false, members: [] };
     }
   }
 
@@ -1077,21 +1096,26 @@
     });
   }
 
-  /** 真正执行清除：只删 1ct:state:<memberId>.failed 里今天（北京日）的键。 */
+  /** 真正执行清除：只删 1ct:state:<memberId> 里今天（北京日）的 failed 与 clubChecks。 */
   function doClearFailedLocks() {
     if (!hasFn(M, 'clearFailedLocks')) {
       pushLog('error', '清除失败锁定用不了：本机数据服务不可用，请重启软件再试');
       return;
     }
     var cleared = 0;
+    var clubCleared = 0;
     try {
       var result = M.clearFailedLocks();
       cleared = num(result && result.cleared, 0) || 0;
+      clubCleared = num(result && result.clubCleared, 0) || 0;
     } catch (e) {
       pushLog('error', '清除失败锁定失败：' + sanitizeError(e));
       return;
     }
-    pushLog('info', '已清除今日失败锁定：' + cleared + ' 项');
+    pushLog(
+      'info',
+      '已清除今日失败锁定：' + cleared + ' 项' + (clubCleared ? '（含俱乐部重试计数 ' + clubCleared + ' 项）' : ''),
+    );
     if (ui.tab === 'run') renderView();
   }
 
@@ -1390,6 +1414,488 @@
    * 只读行：用于「由程序自动决定、用户不需要也不应该手填」的参数（如校园跑随机窗口/里程）。
    * 渲染成 div（不是 input），因此不会被误当成可编辑控件；保留 testid 供测试断言存在。
    */
+  /**
+   * 校园跑「跑步校区」配置。
+   *
+   * 为什么需要它：校区数据只有 main 侧一个来源 —— `userData/unirun/localdb.v1.json`
+   * （`reverse/sources/main/src/main/unirun/localDb.ts:35-41`，`defaultCampuses()` 返回空数组）。
+   * 1CT 的界面里没有原版「校园跑」页，成员页也只有俱乐部校区，所以用户**无处**选跑步校区；
+   * 本地库为空时引擎 `planUnirun` 只会出 `waiting-material / no-campus`，永远不提交
+   * （本机 1.2.2 实测：10:31 起每轮都是 `校园跑跑步｜等待材料｜no-campus`、0 次 POST）。
+   *
+   * 这里给最小可操作入口，且严格「不替用户做决定」：
+   *   本地为空 → 拉云端列表（`campusCloudList`）→ 用户点「下载并保存」→ `campusCloudPull`
+   *   把校区+地图写进本地库 → **重新读本地库确认命中** → 才写 `unirun.campusId`。
+   * 任何一步失败都只报中文错误、保持可重试，绝不写 campusId、绝不自动选别校。
+   */
+  var campusState = { local: [], cloud: null, busy: false, error: '', host: null };
+
+  function campusApiCall(name, payload) {
+    var api = window.ctAPI;
+    if (!api || !api.unirun || !hasFn(api.unirun, name)) {
+      return Promise.reject(new Error('本机校园跑服务不可用'));
+    }
+    try {
+      return Promise.resolve(api.unirun[name](payload));
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+
+  function campusDisplayName(campus) {
+    return trim(campus && (campus.label || campus.name)) || '未命名校区';
+  }
+
+  function campusCurrent() {
+    var id = cfgText('unirun.campusId');
+    if (!id) return null;
+    for (var i = 0; i < campusState.local.length; i += 1) {
+      if (String(campusState.local[i].id) === id) return campusState.local[i];
+    }
+    return null;
+  }
+
+  /**
+   * 读本地校区库。返回 `{ok, rows}`：`ok=false` 表示**读取本身失败**（IPC/库坏了），
+   * 调用方必须据此保留真实错误文案，不能把它当成「还没下载」——否则会把用户引去重试下载。
+   */
+  function campusRefreshLocal() {
+    return campusApiCall('campusLocalList').then(function (rows) {
+      campusState.local = Array.isArray(rows) ? rows : [];
+      campusState.error = '';
+      return { ok: true, rows: campusState.local };
+    }).catch(function (e) {
+      campusState.local = [];
+      campusState.error = '读取本地校区失败：' + sanitizeError(e) + '（请重启软件后重试）';
+      return { ok: false, rows: [] };
+    }).then(function (result) {
+      renderCampusSetup();
+      return result;
+    });
+  }
+
+  function campusLoadCloud() {
+    if (campusState.busy) return Promise.resolve(false);
+    campusState.busy = true;
+    campusState.error = '';
+    renderCampusSetup();
+    return campusApiCall('campusCloudList').then(function (rows) {
+      campusState.cloud = Array.isArray(rows) ? rows : [];
+      if (!campusState.cloud.length) campusState.error = '云端没有返回可用校区，请稍后重试';
+      return campusState.cloud.length > 0;
+    }).catch(function (e) {
+      campusState.error = '获取云端校区失败：' + sanitizeError(e) + '（可再点一次重试）';
+      return false;
+    }).then(function (ok) {
+      campusState.busy = false;
+      renderCampusSetup();
+      return ok;
+    });
+  }
+
+  /** 写 `unirun.campusId` 前必须确认该校区已在本机库里 —— 否则引擎仍会 no-campus。 */
+  function campusSaveChoice(id) {
+    var campusId = trim(id);
+    if (!campusId) {
+      campusState.error = '请先选择一个校区';
+      renderCampusSetup();
+      return Promise.resolve(false);
+    }
+    if (campusState.busy) {
+      campusState.error = '正在处理，请稍等';
+      renderCampusSetup();
+      return Promise.resolve(false);
+    }
+    campusState.busy = true;
+    campusState.error = '';
+    renderCampusSetup();
+    return campusRefreshLocal().then(function (local) {
+      if (!local.ok) return false;
+      var rows = local.rows;
+      var hit = null;
+      for (var i = 0; i < rows.length; i += 1) {
+        if (String(rows[i].id) === campusId) hit = rows[i];
+      }
+      if (!hit) {
+        campusState.error = '这个校区还没下载到本机，请先点「下载并保存」';
+        return false;
+      }
+      if (!saveGlobalConfig(pathPatch('unirun.campusId', campusId))) {
+        campusState.error = '校区没能写入本机设置，请重启软件后重试';
+        return false;
+      }
+      pushLog('info', '校园跑校区已设置为：' + campusDisplayName(hit));
+      return true;
+    }).catch(function (e) {
+      campusState.error = '保存校区失败：' + sanitizeError(e);
+      return false;
+    }).then(function (ok) {
+      campusState.busy = false;
+      renderCampusSetup();
+      return ok;
+    });
+  }
+
+  function campusPullAndSave(id) {
+    var campusId = trim(id);
+    if (!campusId) {
+      campusState.error = '请先选择一个校区';
+      renderCampusSetup();
+      return Promise.resolve(false);
+    }
+    if (campusState.busy) {
+      campusState.error = '正在处理，请稍等';
+      renderCampusSetup();
+      return Promise.resolve(false);
+    }
+    campusState.busy = true;
+    campusState.error = '';
+    renderCampusSetup();
+    return campusApiCall('campusCloudPull', { campusId: campusId }).then(function () {
+      // 下载成功不等于可用：必须重新读本地库确认真的落库了
+      return campusRefreshLocal();
+    }).then(function (local) {
+      if (!local.ok) return false;
+      var rows = local.rows;
+      var hit = null;
+      for (var i = 0; i < rows.length; i += 1) {
+        if (String(rows[i].id) === campusId) hit = rows[i];
+      }
+      if (!hit) {
+        campusState.error = '下载完成但本机库里没有这个校区，请重试或换一个校区';
+        return false;
+      }
+      if (!saveGlobalConfig(pathPatch('unirun.campusId', campusId))) {
+        campusState.error = '校区已下载，但没能写入本机设置，请重启软件后重试';
+        return false;
+      }
+      pushLog('info', '校园跑校区已下载并设置为：' + campusDisplayName(hit));
+      return true;
+    }).catch(function (e) {
+      campusState.error = '下载校区失败：' + sanitizeError(e) + '（可再点一次重试）';
+      return false;
+    }).then(function (ok) {
+      campusState.busy = false;
+      renderCampusSetup();
+      return ok;
+    });
+  }
+
+  function campusSelectNode(list, testid) {
+    var select = h('select', { class: 'one-ct-select', 'data-testid': testid }, list.map(function (c) {
+      return h('option', { value: String(c.id), text: campusDisplayName(c) });
+    }));
+    return select;
+  }
+
+  function campusButton(labelText, testid, onClick) {
+    var btn = h('button', { class: 'one-ct-btn', type: 'button', 'data-testid': testid, text: labelText });
+    btn.addEventListener('click', function () {
+      if (campusState.busy) return;
+      onClick();
+    });
+    return btn;
+  }
+
+  /**
+   * 成员级 `unirun.campusId` 覆盖（成员设置优先于全局）。
+   * 全局选好校区但某个启用成员自己指定了别的（或已被删掉的）校区时，
+   * 引擎用的是成员那个 —— 必须用中文点名，否则用户会以为「全局选了就生效」。
+   * 只提示，不自动删除成员覆盖（那是用户的数据）。
+   */
+  function campusMemberOverrides() {
+    var out = [];
+    if (!hasFn(M, 'effectiveConfig')) return out;
+    // 关键：effectiveConfig 已经把全局层合进去了，所以只有「与全局不同」才算成员级覆盖。
+    // 不比较就会把全局校区当成每个成员自己的设置，把用户引去成员页乱改。
+    var globalId = '';
+    try {
+      var globalEff = M.effectiveConfig(null) || {};
+      globalId = trim(globalEff && globalEff.unirun && globalEff.unirun.campusId);
+    } catch (e) {
+      globalId = '';
+    }
+    var members = typeof memberList === 'function' ? memberList() : [];
+    members.forEach(function (member) {
+      if (!member || member.enabled !== true) return;
+      var id = member.id ? String(member.id) : '';
+      if (!id) return;
+      var eff = null;
+      try {
+        eff = M.effectiveConfig(id) || {};
+      } catch (e) {
+        return;
+      }
+      var campusId = trim(eff && eff.unirun && eff.unirun.campusId);
+      if (!campusId) return;
+      if (campusId === globalId) return;
+      var hit = null;
+      for (var i = 0; i < campusState.local.length; i += 1) {
+        if (String(campusState.local[i].id) === campusId) hit = campusState.local[i];
+      }
+      out.push({
+        id: id,
+        name: trim(member.name) || trim(member.remark) || '未命名成员',
+        campusId: campusId,
+        campus: hit,
+      });
+    });
+    return out;
+  }
+
+  /**
+   * 成员级覆盖的最小可操作入口。原「成员」页没有校园跑校区控件，
+   * 所以不能只提示「去成员页改」——这里给一个用户显式点击的按钮。
+   * 注意：members 的 deepMerge 里 `campusId:null` 会**覆盖**全局为 null（引擎随后 pickCampus 自动取第一个），
+   * 那不是「继承全局」。所以按钮写入的是**当前全局校区 id**（明确值），不扩删除 API。
+   */
+  function campusMemberUseGlobal(entry) {
+    var globalCampus = campusCurrent();
+    if (!globalCampus) {
+      campusState.error = '请先在上面把全局校区选好，再让成员改用全局校区';
+      renderCampusSetup();
+      return;
+    }
+    if (campusState.busy) {
+      campusState.error = '正在处理，请稍等';
+      renderCampusSetup();
+      return;
+    }
+    var globalId = String(globalCampus.id);
+    campusState.busy = true;
+    campusState.error = '';
+    renderCampusSetup();
+    var result = null;
+    try {
+      result = hasFn(M, 'saveConfig') ? M.saveConfig(entry.id, { unirun: { campusId: globalId } }) : null;
+    } catch (e) {
+      result = { rejected: sanitizeError(e) };
+    }
+    campusState.busy = false;
+    if (result === null || result === false || (isObject(result) && result.rejected)) {
+      campusState.error = '成员「' + entry.name + '」改用全局校区失败：本机设置没写进去（可再点一次重试）';
+      renderCampusSetup();
+      return;
+    }
+    campusState.error = '';
+    pushLog('info', '成员「' + entry.name + '」已改用当前全局校区：' + campusDisplayName(globalCampus));
+    campusRefreshLocal();
+  }
+
+  function campusMemberRow(entry) {
+    var row = h('div', { class: 'one-ct-unirun-param-row' });
+    row.appendChild(h('div', {
+      class: 'one-ct-hint',
+      'data-testid': 'one-ct-unirun-campus-member-row-' + entry.id,
+      text: '成员「' + entry.name + '」：' + (entry.campus
+        ? '当前用自己的校区 ' + campusDisplayName(entry.campus)
+        : '当前指定的校区不在本机库里（' + entry.campusId + '）'),
+    }));
+    row.appendChild(campusButton(
+      '改用当前全局校区',
+      'one-ct-unirun-campus-member-global-' + entry.id,
+      function () {
+        campusMemberUseGlobal(entry);
+      }
+    ));
+    return row;
+  }
+
+  function renderCampusSetup() {
+    var host = campusState.host;
+    if (!host) return;
+    host.innerHTML = '';
+    var current = campusCurrent();
+    if (current) {
+      host.appendChild(h('div', {
+        class: 'one-ct-readonly',
+        'data-testid': 'one-ct-unirun-campus-current',
+        text: '当前：' + campusDisplayName(current) + '（全局默认；成员单独设置过的按成员走）',
+      }));
+    }
+    if (campusState.local.length) {
+      var localSelect = campusSelectNode(campusState.local, 'one-ct-unirun-campus-select');
+      if (current) localSelect.value = String(current.id);
+      host.appendChild(localSelect);
+      host.appendChild(campusButton('保存校区', 'one-ct-unirun-campus-save', function () {
+        campusSaveChoice(localSelect.value);
+      }));
+    } else {
+      host.appendChild(h('div', {
+        class: 'one-ct-hint',
+        'data-testid': 'one-ct-unirun-campus-empty',
+        text: '本机还没有校区数据：校园跑必须先选校区，否则每天只会显示「未选择校区」、不会提交。',
+      }));
+    }
+    // 云端入口始终可见：本机已有一个旧校区（或选错了）时也要能再下载别的校区，
+    // 否则用户会被单个本地校区锁死、没有任何界面可换。
+    host.appendChild(campusButton(
+      campusState.local.length ? '从云端获取更多校区' : '从云端获取校区列表',
+      'one-ct-unirun-campus-cloud',
+      function () {
+        campusLoadCloud();
+      }
+    ));
+    if (campusState.cloud && campusState.cloud.length) {
+      var cloudSelect = campusSelectNode(campusState.cloud, 'one-ct-unirun-campus-cloud-select');
+      host.appendChild(cloudSelect);
+      host.appendChild(campusButton('下载并保存', 'one-ct-unirun-campus-pull', function () {
+        campusPullAndSave(cloudSelect.value);
+      }));
+    }
+    var overrides = campusMemberOverrides();
+    var missingOverride = overrides.filter(function (o) { return !o.campus; });
+    var validOverride = overrides.filter(function (o) { return Boolean(o.campus); });
+    if (missingOverride.length) {
+      host.appendChild(h('div', {
+        class: 'one-ct-hint',
+        'data-testid': 'one-ct-unirun-campus-member-missing',
+        text: missingOverride.map(function (o) {
+          return '成员「' + o.name + '」单独指定的校区不在本机库里';
+        }).join('；') + '：这些成员会一直停在「未选择校区」。点下面的按钮让它们改用全局校区。',
+      }));
+      missingOverride.forEach(function (o) {
+        host.appendChild(campusMemberRow(o));
+      });
+    }
+    if (validOverride.length) {
+      host.appendChild(h('div', {
+        class: 'one-ct-hint',
+        'data-testid': 'one-ct-unirun-campus-member-scope',
+        text: validOverride.map(function (o) {
+          return '成员「' + o.name + '」使用自己的校区：' + campusDisplayName(o.campus);
+        }).join('；'),
+      }));
+      validOverride.forEach(function (o) {
+        host.appendChild(campusMemberRow(o));
+      });
+    }
+    if (campusState.busy) {
+      host.appendChild(h('div', { class: 'one-ct-hint', 'data-testid': 'one-ct-unirun-campus-busy', text: '正在处理…' }));
+    }
+    if (campusState.error) {
+      host.appendChild(h('div', {
+        class: 'one-ct-hint',
+        'data-testid': 'one-ct-unirun-campus-error',
+        text: campusState.error,
+      }));
+    }
+  }
+
+  // ── 校园跑手填参数：引擎「只拦不改写」，所以这里给一键恢复入口（用户点了才改） ──
+
+  function rawJsonAt(key) {
+    try {
+      var raw = window.localStorage.getItem(key);
+      if (!raw) return {};
+      var parsed = JSON.parse(raw);
+      return isObject(parsed) ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function explicitUnirunParams(holder) {
+    var u = isObject(holder) && isObject(holder.unirun) ? holder.unirun : {};
+    var out = {};
+    ['runDistance', 'runTime'].forEach(function (key) {
+      var value = u[key];
+      if (value !== null && value !== undefined && String(value).trim() !== '') out[key] = value;
+    });
+    return out;
+  }
+
+  /** 官方配速 4–10 km/h 对应的合法时长区间（与引擎 pace 契约一致）。 */
+  function suggestedRunMinutes(distanceMeters) {
+    var distance = Number(distanceMeters);
+    if (!isFinite(distance) || distance <= 0) return null;
+    var km = distance / 1000;
+    var lo = Math.max(5, Math.ceil((km / 10) * 60));
+    var hi = Math.min(300, Math.floor((km / 4) * 60));
+    if (!isFinite(lo) || !isFinite(hi) || lo > hi) return null;
+    return { min: lo, max: hi };
+  }
+
+  function unirunParamScopes() {
+    var scopes = [];
+    var globalParams = explicitUnirunParams(rawJsonAt('1ct:config:global'));
+    if (Object.keys(globalParams).length) {
+      scopes.push({ scope: null, label: '全部成员（全局设置）', params: globalParams });
+    }
+    (membersState.items || []).forEach(function (member) {
+      if (!member || member.enabled !== true) return;
+      var id = trim(member.id);
+      if (!id) return;
+      var params = explicitUnirunParams(rawJsonAt('1ct:config:' + id));
+      if (Object.keys(params).length) {
+        scopes.push({ scope: id, label: '成员「' + (trim(member.name) || id) + '」', params: params });
+      }
+    });
+    return scopes;
+  }
+
+  function unirunParamLine(entry) {
+    var params = entry.params;
+    var distance = params.runDistance === undefined ? '' : String(params.runDistance);
+    var minutes = params.runTime === undefined ? '' : String(params.runTime);
+    var line = entry.label + '：手填 ' + (distance || '—') + ' 米 / ' + (minutes || '—') + ' 分钟';
+    var range = suggestedRunMinutes(distance);
+    if (range) {
+      var speed = distance && minutes ? (Number(distance) / 1000) / (Number(minutes) / 60) : null;
+      line += '（官方客户端对该里程只接受 ' + range.min + '–' + range.max + ' 分钟'
+        + (speed && isFinite(speed) ? '，当前配速 ' + speed.toFixed(1) + ' km/h' : '')
+        + '）';
+    }
+    return line;
+  }
+
+  function resetUnirunParams(entry) {
+    var patch = { unirun: { runDistance: null, runTime: null } };
+    var result;
+    try {
+      if (entry.scope) result = hasFn(M, 'saveConfig') ? M.saveConfig(entry.scope, patch) : null;
+      else result = saveGlobalConfig(patch);
+    } catch (e) {
+      pushLog('error', '恢复自动参数失败：' + sanitizeError(e));
+      return;
+    }
+    if (result === null || result === false || (isObject(result) && result.rejected)) {
+      pushLog('error', '恢复自动参数失败：本机设置没写进去，请重启软件再试');
+      return;
+    }
+    pushLog('info', entry.label + '已恢复自动参数：里程与时长按官方配速 4–10 km/h 自动匹配');
+    renderView();
+  }
+
+  function unirunParamResetRow() {
+    var scopes = unirunParamScopes();
+    if (!scopes.length) return h('span', {});
+    var host = h('div', { class: 'one-ct-unirun-params', 'data-testid': 'one-ct-unirun-params' });
+    scopes.forEach(function (entry) {
+      host.appendChild(h('div', { class: 'one-ct-unirun-param-row' }, [
+        h('div', { class: 'one-ct-hint', 'data-testid': 'one-ct-unirun-params-text', text: unirunParamLine(entry) }),
+        h('button', {
+          class: 'one-ct-btn one-ct-btn--ghost',
+          type: 'button',
+          'data-testid': entry.scope ? 'one-ct-unirun-params-reset-' + entry.scope : 'one-ct-unirun-params-reset',
+          text: '恢复自动合法参数',
+          onClick: function () {
+            resetUnirunParams(entry);
+          },
+        }),
+      ]));
+    });
+    return host;
+  }
+
+  function campusSetupRow() {
+    var control = h('div', { class: 'one-ct-field-control' });
+    campusState.host = control;
+    var node = field('跑步校区', control, '校园跑提交前必须先选校区（校区和地图会下载到本机，不上传）');
+    campusRefreshLocal();
+    return node;
+  }
+
   function readonlyRow(labelText, valueText, testid, hint) {
     var box = h('div', {
       class: 'one-ct-readonly',
@@ -1418,6 +1924,100 @@
       opts.label ? h('span', { class: 'one-ct-switch-label', text: opts.label }) : null,
     ]);
     return { node: label, input: box };
+  }
+
+  /** 俱乐部校区选项：'' = 不筛选（旧行为），其余按上游活动文本里的校区名。 */
+  var CLUB_CAMPUS_OPTIONS = [
+    { value: '', label: '不筛选' },
+    { value: '航空港', label: '航空港' },
+    { value: '龙泉', label: '龙泉' },
+  ];
+
+  function clubCampusValue(value) {
+    var raw = trim(value);
+    for (var i = 0; i < CLUB_CAMPUS_OPTIONS.length; i += 1) {
+      if (CLUB_CAMPUS_OPTIONS[i].value === raw) return raw;
+    }
+    return '';
+  }
+
+  function clubCampusLabel(value) {
+    var raw = clubCampusValue(value);
+    for (var i = 0; i < CLUB_CAMPUS_OPTIONS.length; i += 1) {
+      if (CLUB_CAMPUS_OPTIONS[i].value === raw) return CLUB_CAMPUS_OPTIONS[i].label;
+    }
+    return CLUB_CAMPUS_OPTIONS[0].label;
+  }
+
+  /**
+   * 下拉选择：值一律按字符串存（如 club.campusName 的 '' / '航空港' / '龙泉'）。
+   * options: [{ value, label }]；值不在选项里时落在第一项（即「不筛选」）。
+   */
+  function configSelectField(labelText, path, options, testid, hint) {
+    var list = Array.isArray(options) ? options : [];
+    var select = h('select', { class: 'one-ct-select', 'data-testid': testid }, list.map(function (opt) {
+      return h('option', { value: opt.value, text: opt.label });
+    }));
+    function labelOf(value) {
+      for (var i = 0; i < list.length; i += 1) {
+        if (list[i].value === value) return list[i].label;
+      }
+      return '';
+    }
+    select.value = labelOf(cfgText(path)) ? cfgText(path) : (list.length ? list[0].value : '');
+    select.addEventListener('change', function () {
+      var next = text(select.value);
+      if (!saveGlobalConfig(pathPatch(path, next))) {
+        select.value = cfgText(path);
+        return;
+      }
+      pushLog('info', '「' + labelText + '」已保存：' + (labelOf(next) || next || '（不筛选）'));
+    });
+    return field(labelText, h('div', { class: 'one-ct-field-control' }, [select]), hint);
+  }
+
+  /**
+   * 可留空的文本输入（签到点坐标这类「不填也有意义」的参数）。
+   * opts.validate(raw) 返回：合法值（字符串）| '' （留空）| null（非法，还原）。
+   */
+  function configTextField(labelText, path, testid, opts) {
+    var options = opts || {};
+    var input = h('input', {
+      class: 'one-ct-input',
+      type: 'text',
+      inputmode: options.inputmode || null,
+      value: cfgText(path),
+      placeholder: options.placeholder || '',
+      'data-testid': testid,
+    });
+    input.addEventListener('change', function () {
+      var raw = trim(input.value);
+      if (typeof options.validate === 'function') {
+        var checked = options.validate(raw);
+        if (checked === null) {
+          input.value = cfgText(path);
+          pushLog('warn', '「' + labelText + '」格式不对（可留空），已还原');
+          return;
+        }
+        raw = text(checked);
+      }
+      input.value = raw;
+      if (saveGlobalConfig(pathPatch(path, raw))) {
+        pushLog('info', '「' + labelText + '」已保存：' + (raw || '（空）'));
+      }
+    });
+    return field(labelText, h('div', { class: 'one-ct-field-control' }, [input]), options.hint);
+  }
+
+  /** 坐标校验：允许留空；非空必须是范围内数字（返回原文本，空串表示清空）。 */
+  function coordValidator(min, max) {
+    return function (raw) {
+      if (!raw) return '';
+      if (!/^-?\d{1,3}(\.\d{1,10})?$/.test(raw)) return null;
+      var value = Number(raw);
+      if (!Number.isFinite(value) || value < min || value > max) return null;
+      return raw;
+    };
   }
 
   function configSwitchField(path, labelText, testid, hint) {
@@ -1588,7 +2188,8 @@
         ]),
         h('div', { class: 'one-ct-hint', 'data-testid': 'one-ct-clear-failed-lock-hint' }, [
           failedLock.count
-            ? '今天有 ' + failedLock.count + ' 项失败被锁定，清掉后下一轮会重新尝试'
+            ? '今天有 ' + failedLock.count + ' 项失败被锁定，清掉后下一轮会重新尝试' +
+              (failedLock.clubCount ? '（含俱乐部重试计数 ' + failedLock.clubCount + ' 项）' : '')
             : '今天没有失败的锁定',
         ]),
         h('div', {
@@ -1720,10 +2321,12 @@
       switchNode: moduleSwitch('unirun.enabled', 'one-ct-module-unirun', '启用', '校园跑自动业务').node,
       rows: [
         configTimeField('每日执行时刻', 'unirun.runAt', 'one-ct-unirun-runat', '每天几点开始尝试提交，本机时区'),
+        campusSetupRow(),
         readonlyRow('有效窗口', '自动随机 39–48 分钟（当天固定，换天重新随机）', 'one-ct-unirun-window'),
-        readonlyRow('里程', '自动随机约 1000 米，末位不是 0（1000、1100 会被平台作废）', 'one-ct-unirun-distance'),
-        readonlyRow('时长', '自动随机 31–39 分钟（避开 5 的倍数，当天固定）', 'one-ct-unirun-time'),
-        h('div', { class: 'one-ct-hint', text: '账号和校区在「成员」页按成员填写。' }),
+        readonlyRow('里程', '自动随机 1000–1099 米（当天固定），时长按官方配速 4–10 km/h 自动匹配', 'one-ct-unirun-distance'),
+        readonlyRow('时长', '按当次里程与官方配速 4–10 km/h 自动推算（当天固定）', 'one-ct-unirun-time'),
+        unirunParamResetRow(),
+        h('div', { class: 'one-ct-hint', text: '校园跑账号在「成员」页按成员填写；校区在上面选（成员可以单独设置，成员设置优先）。' }),
       ],
     });
 
@@ -1736,6 +2339,26 @@
         configKeywordField('活动关键词', 'club.keywords', 'one-ct-club-keywords'),
         configSwitchField('club.allowAll', '关键词留空时全部参加', 'one-ct-club-allowall', '仍然受下面的每日报名上限限制'),
         configNumberField('每日报名上限', 'club.dailyJoinLimit', 1, 20, 1, 'one-ct-club-dailylimit'),
+        configSelectField('校区', 'club.campusName', CLUB_CAMPUS_OPTIONS, 'one-ct-club-campus',
+          '这里的校区是「全局默认」；按成员不同的校区请在「成员」页各自设置（成员设置优先）。不筛选会把两个校区的活动混在一起，容易签到别的校区'),
+        configTextField('签到点坐标（纬度）', 'club.fallbackLatitude', 'one-ct-club-fallback-lat', {
+          placeholder: '如 30.5678（可留空）',
+          inputmode: 'decimal',
+          validate: coordValidator(-90, 90),
+          hint: '学校没下发签到位时用它提交；不填则一直停在缺少坐标（need-coords）。这是全局默认值，成员可在「成员」页各自覆盖',
+        }),
+        configTextField('签到点坐标（经度）', 'club.fallbackLongitude', 'one-ct-club-fallback-lng', {
+          placeholder: '如 104.2345（可留空）',
+          inputmode: 'decimal',
+          validate: coordValidator(-180, 180),
+          hint: '和纬度成对填写（例如本校区田径场门口）；不填则一直停在缺少坐标。按成员的坐标请在「成员」页设置，成员设置优先',
+        }),
+        configSwitchField(
+          'club.allowOtherCampus',
+          '允许跨校区',
+          'one-ct-club-allowothercampus',
+          '允许跨校区（可能把记录落到别的校区）；默认关闭，只跑本校区活动。按成员设置请在「成员」页覆盖',
+        ),
       ],
     });
 
@@ -2445,6 +3068,117 @@
     });
     var syncGapHost = h('div', { class: 'one-ct-sync-gaps', 'data-testid': 'one-ct-sync-gaps' });
 
+    // ── 俱乐部（按成员：校区 / 签到点坐标 / 跨校区） ──
+    // 校区是「学生属性」而不是「电脑属性」：一台电脑可能同时跑龙泉和航空港的同学，
+    // 所以这三个键必须能按成员覆盖。写入走 M.saveConfig(memberId, patch) →
+    // 1ct:config:<memberId>（成员覆盖层），引擎按 effectiveConfig(memberId) 取生效值。
+    var pendingClubPatch = null;
+
+    /** 该成员当前的俱乐部生效值（默认 ⊕ 全局 ⊕ 成员覆盖；新成员只有前两层）。 */
+    function clubEffective() {
+      var eff = {};
+      try {
+        if (hasFn(M, 'effectiveConfig')) eff = M.effectiveConfig(draft && draft.id ? draft.id : null) || {};
+      } catch (e) {
+        eff = {};
+      }
+      return isObject(eff.club) ? eff.club : {};
+    }
+
+    var clubEff = clubEffective();
+
+    /** 写成员覆盖层：新成员先攒着，保存成员拿到 id 后再落盘。 */
+    function saveClubOverride(patch, labelText, valueText) {
+      if (!hasFn(M, 'saveConfig')) {
+        setError('保存失败：本机数据服务不可用，请重启软件再试');
+        return false;
+      }
+      var memberId = draft && draft.id;
+      if (!memberId) {
+        pendingClubPatch = deepMerge(pendingClubPatch || {}, patch);
+        setError('');
+        return true;
+      }
+      try {
+        M.saveConfig(memberId, patch);
+      } catch (e) {
+        setError('保存失败：' + sanitizeError(e));
+        return false;
+      }
+      clubEff = clubEffective();
+      setError('');
+      pushLog('info', '成员「' + (text(draft.name) || memberId) + '」的' + labelText + '已保存：' + valueText);
+      return true;
+    }
+
+    var clubCampusSelect = h(
+      'select',
+      { class: 'one-ct-select', 'data-testid': 'one-ct-member-club-campus' },
+      CLUB_CAMPUS_OPTIONS.map(function (opt) {
+        return h('option', { value: opt.value, text: opt.label });
+      }),
+    );
+    clubCampusSelect.value = clubCampusValue(clubEff.campusName);
+    clubCampusSelect.addEventListener('change', function () {
+      var next = clubCampusValue(clubCampusSelect.value);
+      if (!saveClubOverride(pathPatch('club.campusName', next), '校区', clubCampusLabel(next))) {
+        clubCampusSelect.value = clubCampusValue(clubEff.campusName);
+      }
+    });
+
+    var clubLatInput = h('input', {
+      class: 'one-ct-input',
+      type: 'text',
+      inputmode: 'decimal',
+      value: text(clubEff.fallbackLatitude),
+      placeholder: '如 30.5678（可留空）',
+      'data-testid': 'one-ct-member-club-fallback-lat',
+    });
+    clubLatInput.addEventListener('change', function () {
+      var checked = coordValidator(-90, 90)(trim(clubLatInput.value));
+      if (checked === null) {
+        clubLatInput.value = text(clubEff.fallbackLatitude);
+        setError('签到点纬度要填 -90~90 之间的数字（可留空）');
+        return;
+      }
+      clubLatInput.value = text(checked);
+      saveClubOverride(pathPatch('club.fallbackLatitude', text(checked)), '签到点纬度', text(checked) || '（空）');
+    });
+
+    var clubLngInput = h('input', {
+      class: 'one-ct-input',
+      type: 'text',
+      inputmode: 'decimal',
+      value: text(clubEff.fallbackLongitude),
+      placeholder: '如 104.2345（可留空）',
+      'data-testid': 'one-ct-member-club-fallback-lng',
+    });
+    clubLngInput.addEventListener('change', function () {
+      var checked = coordValidator(-180, 180)(trim(clubLngInput.value));
+      if (checked === null) {
+        clubLngInput.value = text(clubEff.fallbackLongitude);
+        setError('签到点经度要填 -180~180 之间的数字（可留空）');
+        return;
+      }
+      clubLngInput.value = text(checked);
+      saveClubOverride(pathPatch('club.fallbackLongitude', text(checked)), '签到点经度', text(checked) || '（空）');
+    });
+
+    var clubOtherCampusCtl = switchControl({
+      checked: clubEff.allowOtherCampus === true,
+      label: '允许跨校区',
+      testid: 'one-ct-member-club-allowothercampus',
+      onChange: function (checked) {
+        if (!saveClubOverride(
+          pathPatch('club.allowOtherCampus', checked),
+          '跨校区开关',
+          checked ? '允许' : '不允许',
+        )) {
+          clubOtherCampusCtl.input.checked = !checked;
+        }
+      },
+    });
+
     function renderSyncStatus(target) {
       var m = target || draft;
       clear(syncStatusHost);
@@ -2608,6 +3342,16 @@
         reloadMembers();
         var refreshed = draft.id ? getMember(draft.id) : null;
         if (refreshed) draft = clone(refreshed);
+        // 新成员在弹层里先填了俱乐部覆盖（校区/坐标/跨校区）：这时才有 id，补写成员配置层。
+        if (pendingClubPatch && draft.id && hasFn(M, 'saveConfig')) {
+          try {
+            M.saveConfig(draft.id, pendingClubPatch);
+            pendingClubPatch = null;
+            clubEff = clubEffective();
+          } catch (e) {
+            pushLog('warn', '成员俱乐部设置没保存上：' + sanitizeError(e));
+          }
+        }
         draft.ekStatus = draft.ekStatus || 'none';
         syncBadge(draft);
         renderSyncStatus(draft);
@@ -3004,6 +3748,25 @@
         field('手机号', h('div', { class: 'one-ct-field-control' }, [unirunPhoneInput]), '列表里只显示 138****0000 这样的打码号码'),
         field('密码', h('div', { class: 'one-ct-field-control' }, [unirunPasswordInput])),
         field('备注', h('div', { class: 'one-ct-field-control' }, [unirunRemarkInput, unirunVerifyBtn, unirunStatusHost])),
+      ]),
+      // 俱乐部：校区/签到点坐标是「按成员」的（一台电脑可能跑多个校区的同学）
+      h('div', { class: 'one-ct-form-section', 'data-testid': 'one-ct-member-club-section' }, [
+        h('div', { class: 'one-ct-form-section-head' }, [
+          h('span', { class: 'one-ct-form-section-title', text: '俱乐部（按成员）' }),
+        ]),
+        field('校区', h('div', { class: 'one-ct-field-control' }, [clubCampusSelect]),
+          '这位同学所在的校区。不筛选 = 跟运行页的全局设置走；填了之后只跑本校区的活动'),
+        field('签到点纬度', h('div', { class: 'one-ct-field-control' }, [clubLatInput]),
+          '学校没下发签到位时用它提交；不填则一直停在缺少坐标。成员填写优先于运行页的全局默认'),
+        field('签到点经度', h('div', { class: 'one-ct-field-control' }, [clubLngInput]),
+          '和纬度成对填写，例如本校区田径场门口'),
+        field('跨校区', h('div', { class: 'one-ct-field-control' }, [clubOtherCampusCtl.node]),
+          '允许跨校区（可能把记录落到别的校区）；默认关闭'),
+        h('div', {
+          class: 'one-ct-hint',
+          'data-testid': 'one-ct-member-club-hint',
+          text: '这些设置只对这位同学生效，改完立即保存；新成员会随下面的「保存」一起写入。',
+        }),
       ]),
     ]);
 
@@ -5300,21 +6063,41 @@
 
   var MIGRATION_PREVIEW_OFF = 'migrations.previewOffV1';
 
-  /* 预览模式已下线：只把还留在「预览」的旧设置改成真实执行，跑过一次就记标记。 */
+  /* 预览模式已下线：真实执行模式必须「落盘」，不能只改界面口径。
+   * 引擎 DEFAULTS.dryRun=true 是安全默认；渲染层若不把 dryRun=false 写进 1ct:config:global，
+   * 引擎读到的有效配置仍是预览 → 校园跑/俱乐部/二课只产出 dry-run 行、永不真正提交。
+   * 因此每次启动都幂等对齐：已经是 false 就不写（避免每次启动写盘）；缺键、或被外部写回 true 都纠正成 false。 */
   function migratePreviewOff() {
-    if (cfgGet(MIGRATION_PREVIEW_OFF) === true) return false;
     var stored = {};
     try {
       if (hasFn(M, 'loadGlobalConfig')) stored = M.loadGlobalConfig() || {};
     } catch (e) {
       stored = {};
     }
-    var hadPreview = isObject(stored) && stored.dryRun === true;
-    var patch = { migrations: { previewOffV1: true } };
-    if (hadPreview) patch.dryRun = false;
+    // 已经落盘为真实执行 → 不重复写
+    if (isObject(stored) && stored.dryRun === false) return false;
+    var firstTime = cfgGet(MIGRATION_PREVIEW_OFF) !== true;
+    var patch = { dryRun: false };
+    if (firstTime) patch.migrations = { previewOffV1: true };
     var saved = saveGlobalConfig(patch);
-    if (saved && hadPreview) pushLog('info', '预览模式已下线，自动运行将真实执行');
-    return saved && hadPreview;
+    if (!saved) {
+      // fail-closed：写不进本机设置就别假装在真实执行——否则界面说真实执行、引擎仍是预览，用户白等一天。
+      storageGate = '真实执行模式没写进本机设置，自动运行已暂停（避免每天空跑）：请重启软件，或检查本机存储权限';
+      pushLog('error', storageGate);
+      renderStatus();
+      return false;
+    }
+    if (storageGate) {
+      storageGate = '';
+      renderStatus();
+    }
+    pushLog(
+      'info',
+      firstTime
+        ? '预览模式已下线，自动运行将真实执行'
+        : '检测到预览开关被重新打开，已改回真实执行（自动运行会真的提交）',
+    );
+    return true;
   }
 
   /* 旧版「有效窗口 / 里程 / 时长」是手填项，现在改由程序每天随机：只清掉恰好等于旧默认值的项。 */
@@ -5418,7 +6201,21 @@
       });
     }
 
-    /** 失败记录：任何模块的 failed/unknown（带学校返回原因），最新在前。 */
+    /**
+     * 失败记录：任何模块的 failed/unknown（带学校返回原因），
+     * 外加俱乐部「签不上」的等待行（waiting-material + 可解释原因：没坐标 / 缺日期 / 跨校区 / 重试用尽），
+     * 最新在前。
+     *
+     * 为什么要把 waiting-material 纳进来：龙泉校区签不上时结果就是 waiting-material，
+     * 旧口径只收 failed/unknown → 用户在记录页看不到任何原因（静默空转）。
+     */
+    var FAILURE_WAITING_REASONS = [
+      'need-coords', 'missing-date', 'other-campus', 'club-attempts-exhausted',
+      // 校园跑「什么都没发生」的三种最常见原因：不选校区 / 没配账号 / 配速非法。
+      // 不纳进来用户就只能看到空白失败页（本机 1.2.2 实测：no-campus 每轮 0 提交但页面无任何提示）。
+      'no-campus', 'no-unirun-account', 'need-sign-in-first',
+      'invalid-run-params', 'pace-out-of-range',
+    ];
     function failuresOf() {
       var all = loadResultEvents();
       if (!Array.isArray(all)) return [];
@@ -5426,7 +6223,8 @@
         .filter(function (ev) {
           if (!isObject(ev)) return false;
           if (filter.memberId && String(ev.memberId || '') !== filter.memberId) return false;
-          return ev.status === 'failed' || ev.status === 'unknown';
+          if (ev.status === 'failed' || ev.status === 'unknown') return true;
+          return ev.status === 'waiting-material' && FAILURE_WAITING_REASONS.indexOf(trim(ev.reason)) >= 0;
         })
         .sort(function (a, b) { return num(b.at, 0) - num(a.at, 0); });
     }
@@ -5498,11 +6296,14 @@
           ]);
         });
 
-      // 失败记录：学校返回的原因（detail）一行截断，hover 看全文；没有 detail 时退回固定原因码
+      // 失败记录：学校返回的原因（detail）一行截断，hover 看全文；没有 detail 时退回固定原因码。
+      // 带上活动名（列头就是「活动 / 说明」）：否则 waiting-material 这类行只剩原因码，看不出是哪个活动。
       var failedEvents = failuresOf();
       var failedRows = failedEvents.slice(0, 50).map(function (ev) {
         var detail = rowDetail(ev);
         var reasonText = detail || reasonCn(ev.reason) || '—';
+        var activityName = trim(ev.activityName || ev.name);
+        var cellText = activityName ? activityName + '｜' + reasonText : reasonText;
         var actionText =
           (MODULE_CN[ev.module] || trim(ev.module) || '未知') + (ACTION_CN[ev.action] || trim(ev.action) || '');
         return h('tr', { 'data-testid': 'one-ct-records-failed-row' }, [
@@ -5512,9 +6313,9 @@
           h('td', null, [
             h('span', {
               class: 'one-ct-detail-cell',
-              title: reasonText,
+              title: cellText,
               'data-has-detail': detail ? '1' : '',
-              text: detailShort(reasonText, 48),
+              text: detailShort(cellText, 48),
             }),
           ]),
         ]);
@@ -5913,7 +6714,7 @@
     openNoticeModal({
       testid: 'one-ct-whatsnew-modal',
       title: '本次更新',
-      sub: '这一版的变化（只提示一次）',
+      sub: '1CT ' + APP_VERSION + ' · 这一版的变化（只提示一次）',
       body: [
         h('div', { class: 'one-ct-whatsnew-list' }, CHANGELOG.map(function (line) {
           return h('div', { class: 'one-ct-whatsnew-item', 'data-testid': 'one-ct-whatsnew-item' }, [

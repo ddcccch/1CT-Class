@@ -2248,16 +2248,21 @@
 
     /**
      * 清除「今日失败锁定」：只删 1ct:state:<memberId>.failed 里 key 以今天（北京日）
-     * 开头的项 —— 引擎因此只锁当天，清了之后下一轮会重新尝试。
+     * 开头的项，同时删今天（北京日）的 .clubChecks —— 引擎因此只锁当天，清了之后下一轮会重新尝试。
+     *
+     * 为什么要连 clubChecks 一起清：俱乐部「最多试 N 次」的预算记在 state.clubChecks 里
+     * （见 automation.js clearClubCheckLocks 注释），只清 failed 会让用户「点了清除还永远停在
+     * club-attempts-exhausted」。
      *
      * 口径（严格）：
-     *  - 只碰 failed；done / inflight / 其它计数与结果历史（1ct:results）一律不动；
+     *  - 只碰 failed / clubChecks；done / inflight / daily 与结果历史（1ct:results）一律不动；
      *  - 只处理启用成员（options.memberId 可指定单个成员）；
      *  - 引擎 key 形如 `YYYY-MM-DD|账号|模块|活动|动作`，用「key 以今天开头」判归属；
+     *  - clubChecks 的删除交给引擎 `A.clearClubCheckLocks(state, today)`（同一口径，不重复实现）；
      *  - options.dryRun 只统计不落盘（UI 用它决定按钮是否可点）。
      *
-     * @returns {{cleared:number, today:string, dryRun:boolean, corrupt:boolean,
-     *   members:Array<{memberId,memberName,cleared,keys,error?}>}}
+     * @returns {{cleared:number, clubCleared:number, today:string, dryRun:boolean, corrupt:boolean,
+     *   members:Array<{memberId,memberName,cleared,clubCleared,keys,error?}>}}
      */
     function clearFailedLocks(options) {
       var opts = isPlainObject(options) ? options : {};
@@ -2265,8 +2270,20 @@
       var today = beijingDay(now());
       var onlyMemberId = text(opts.memberId);
       var state = readMembersState();
-      var out = { cleared: 0, today: today, dryRun: dryRun, corrupt: state.corrupt === true, members: [] };
+      var out = {
+        cleared: 0,
+        clubCleared: 0,
+        today: today,
+        dryRun: dryRun,
+        corrupt: state.corrupt === true,
+        members: [],
+      };
       if (state.corrupt) return out;
+      var engineModule = automation();
+      var clearClubLocks =
+        engineModule && typeof engineModule.clearClubCheckLocks === 'function'
+          ? engineModule.clearClubCheckLocks
+          : null;
       var targets = state.items.filter(function (member) {
         if (onlyMemberId) return text(member.id) === onlyMemberId;
         return member.enabled === true;
@@ -2287,19 +2304,25 @@
         } catch (e) {
           return; // state 损坏：不猜、不覆盖（引擎侧同口径 fail-closed）
         }
-        if (!isPlainObject(parsed) || !isPlainObject(parsed.failed)) return;
-        var failed = parsed.failed;
+        if (!isPlainObject(parsed)) return;
+        var failed = isPlainObject(parsed.failed) ? parsed.failed : {};
+        var clubChecks = isPlainObject(parsed.clubChecks) ? parsed.clubChecks : {};
         var removedKeys = [];
         Object.keys(failed).forEach(function (key) {
           if (text(key).indexOf(today) === 0) removedKeys.push(key);
         });
-        if (!removedKeys.length) return;
+        var clubKeys = Object.keys(clubChecks).filter(function (key) {
+          return text(key).indexOf(today + '|') === 0;
+        });
+        if (!removedKeys.length && !clubKeys.length) return;
         if (dryRun) {
           out.cleared += removedKeys.length;
+          out.clubCleared += clubKeys.length;
           out.members.push({
             memberId: id,
             memberName: text(member.name),
             cleared: removedKeys.length,
+            clubCleared: clubKeys.length,
             keys: removedKeys,
           });
           return;
@@ -2313,6 +2336,23 @@
           if (removedKeys.indexOf(key) < 0) nextFailed[key] = failed[key];
         });
         next.failed = nextFailed;
+        var clubRemoved = 0;
+        if (clubKeys.length) {
+          // 先浅拷贝一份再交给引擎删，避免改到 parsed（同一对象引用）造成 dryRun/异常路径半清。
+          next.clubChecks = {};
+          Object.keys(clubChecks).forEach(function (key) {
+            next.clubChecks[key] = clubChecks[key];
+          });
+          if (clearClubLocks) {
+            clubRemoved = Number(clearClubLocks(next, today)) || 0;
+          } else {
+            // 引擎未加载（脚本顺序）：按同口径兜底，不能让用户点了清除还停在 club-attempts-exhausted。
+            clubKeys.forEach(function (key) {
+              delete next.clubChecks[key];
+              clubRemoved += 1;
+            });
+          }
+        }
         try {
           storage.set(STATE_PREFIX + id, JSON.stringify(next));
         } catch (e) {
@@ -2320,16 +2360,19 @@
             memberId: id,
             memberName: text(member.name),
             cleared: 0,
+            clubCleared: 0,
             keys: removedKeys,
             error: 'storage-write-failed',
           });
           return;
         }
         out.cleared += removedKeys.length;
+        out.clubCleared += clubRemoved;
         out.members.push({
           memberId: id,
           memberName: text(member.name),
           cleared: removedKeys.length,
+          clubCleared: clubRemoved,
           keys: removedKeys,
         });
       });

@@ -552,6 +552,56 @@ test('saveConfig(null) 等价 saveGlobalConfig；成员层深合并且独立', (
   assert.deepEqual(members.effectiveConfig(a.id).club.keywords, [], '成员覆盖互不影响');
 });
 
+test('俱乐部校区/签到点坐标按成员覆盖：写在成员层，互不影响，未覆盖的继承全局', () => {
+  const { members, storage } = makeMembers();
+  const a = addMember(members, { name: '龙泉同学' });
+  const b = addMember(members, { name: '航空港同学' });
+
+  members.saveConfig(null, { club: { campusName: '航空港', fallbackLatitude: '30.1', fallbackLongitude: '104.1' } });
+  members.saveConfig(a.id, {
+    club: { campusName: '龙泉', fallbackLatitude: '30.5678', fallbackLongitude: '104.2345', allowOtherCampus: true },
+  });
+
+  assert.equal(members.effectiveConfig(a.id).club.campusName, '龙泉');
+  assert.equal(members.effectiveConfig(a.id).club.fallbackLatitude, '30.5678');
+  assert.equal(members.effectiveConfig(a.id).club.fallbackLongitude, '104.2345');
+  assert.equal(members.effectiveConfig(a.id).club.allowOtherCampus, true);
+
+  // B 完全不受影响：还是全局值
+  assert.equal(members.effectiveConfig(b.id).club.campusName, '航空港');
+  assert.equal(members.effectiveConfig(b.id).club.fallbackLatitude, '30.1');
+  assert.equal(members.effectiveConfig(b.id).club.fallbackLongitude, '104.1');
+  assert.equal(members.effectiveConfig(b.id).club.allowOtherCampus, false);
+
+  // 全局层没有被成员写穿
+  assert.equal(members.loadGlobalConfig().club.campusName, '航空港');
+  assert.equal(members.loadGlobalConfig().club.fallbackLatitude, '30.1');
+  assert.equal(JSON.parse(storage.raw('1ct:config:' + a.id)).club.campusName, '龙泉');
+});
+
+test('成员只有 clubChecks 时 clearFailedLocks 也不会误删别的成员', () => {
+  const { members, storage } = makeMembers();
+  const a = addMember(members, { name: 'A' });
+  const b = addMember(members, { name: 'B' });
+  storage.set(
+    '1ct:state:' + a.id,
+    JSON.stringify({ done: {}, inflight: {}, failed: {}, clubChecks: { '2026-10-17|20230001|club|act-1|signIn': { count: 3 } } }),
+  );
+  storage.set(
+    '1ct:state:' + b.id,
+    JSON.stringify({
+      done: {},
+      inflight: {},
+      failed: { '2026-10-16|20230001|club|act-2|signIn': { status: 'failed' } },
+      clubChecks: { '2026-10-16|20230001|club|act-2|signIn': { count: 3 } },
+    }),
+  );
+  const result = members.clearFailedLocks();
+  assert.equal(result.clubCleared, 1);
+  assert.deepEqual(readState(storage, a.id).clubChecks, {}, 'A 今天的清掉');
+  assert.equal(Object.keys(readState(storage, b.id).clubChecks).length, 1, 'B 昨天的保留');
+});
+
 test('成员层写 dryRun 被拒绝：{rejected:"dryRun-global-only"}，且不落盘', () => {
   const { members, storage } = makeMembers();
   const member = addMember(members);
@@ -1257,6 +1307,88 @@ test('clearFailedLocks：state 缺失或损坏时安全跳过（不抛错、不�
   const result = members.clearFailedLocks();
   assert.equal(result.cleared, 0);
   assert.equal(storage.raw('1ct:state:' + member.id), '{ not-json', '损坏的 state 不静默覆盖');
+});
+
+// ── task-4：清锁必须同时清「俱乐部重试计数」（clubChecks），否则清完仍停在 club-attempts-exhausted ──
+
+/** 在 seedFailedLocks 的 state 上补 clubChecks：今天一条、昨天一条。 */
+function seedClubChecks(storage, memberId, opts = {}) {
+  const today = opts.today || '2026-10-17';
+  const yesterday = opts.yesterday || '2026-10-16';
+  const raw = JSON.parse(storage.raw('1ct:state:' + memberId) || '{}');
+  raw.clubChecks = {};
+  raw.clubChecks[today + '|20230001|club|act-9|signIn'] = { count: 3, lastAt: T0 - 3600000 };
+  raw.clubChecks[yesterday + '|20230001|club|act-8|signIn'] = { count: 3, lastAt: T0 - DAY_MS };
+  storage.set('1ct:state:' + memberId, JSON.stringify(raw));
+  return raw;
+}
+
+test('clearFailedLocks：同时清掉今天的 clubChecks（俱乐部重试计数）', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  seedFailedLocks(storage, member.id);
+  seedClubChecks(storage, member.id);
+
+  const result = members.clearFailedLocks();
+  assert.equal(result.cleared, 2, 'failed 口径不变');
+  assert.equal(result.clubCleared, 1, '今天的俱乐部重试计数被清掉 1 条');
+
+  const after = readState(storage, member.id);
+  assert.deepEqual(
+    Object.keys(after.clubChecks),
+    ['2026-10-16|20230001|club|act-8|signIn'],
+    '只清今天，昨天的 clubChecks 不动',
+  );
+  assert.equal(result.members[0].clubCleared, 1);
+});
+
+test('clearFailedLocks：只有 clubChecks、没有 failed 时也要清掉（否则按钮点了没用）', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  storage.set(
+    '1ct:state:' + member.id,
+    JSON.stringify({
+      done: {},
+      inflight: {},
+      failed: {},
+      clubChecks: { '2026-10-17|20230001|club|act-9|signIn': { count: 3, lastAt: T0 - 3600000 } },
+    }),
+  );
+
+  const result = members.clearFailedLocks();
+  assert.equal(result.cleared, 0);
+  assert.equal(result.clubCleared, 1);
+  assert.deepEqual(readState(storage, member.id).clubChecks, {}, 'clubChecks 已清空');
+});
+
+test('clearFailedLocks dryRun：clubChecks 只统计不落盘', () => {
+  const { members, storage } = makeMembers();
+  const member = addMember(members);
+  seedFailedLocks(storage, member.id);
+  const seeded = seedClubChecks(storage, member.id);
+
+  const result = members.clearFailedLocks({ dryRun: true });
+  assert.equal(result.clubCleared, 1, 'dryRun 也要统计 clubChecks，否则按钮判不出可点');
+  assert.deepEqual(readState(storage, member.id).clubChecks, seeded.clubChecks, 'dryRun 不得改 clubChecks');
+});
+
+test('clearFailedLocks：走引擎的 A.clearClubCheckLocks（与引擎同一口径）', () => {
+  const calls = [];
+  const spyEngine = Object.assign({}, Automation, {
+    clearClubCheckLocks(state, dayText) {
+      calls.push(dayText);
+      return Automation.clearClubCheckLocks(state, dayText);
+    },
+  });
+  const { members, storage } = makeMembers({ automation: spyEngine });
+  const member = addMember(members);
+  seedFailedLocks(storage, member.id);
+  seedClubChecks(storage, member.id);
+
+  const result = members.clearFailedLocks();
+  assert.deepEqual(calls, ['2026-10-17'], '按北京当日日期调用引擎函数');
+  assert.equal(result.clubCleared, 1);
+  assert.equal(Object.keys(readState(storage, member.id).clubChecks).length, 1);
 });
 
 test('结果历史有界：超出 2000 条时裁掉最旧', () => {

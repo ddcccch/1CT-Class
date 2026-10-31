@@ -53,6 +53,16 @@
   var CLUB_SIGNIN_WINDOW_MIN = 15;
   var CLUB_SIGNOUT_WINDOW_MIN = 15;
 
+  /**
+   * 校园跑官方配速区间（与上游一致）：给定里程，时长必须让配速落在 4~10 km/h。
+   * 区间 = [ceil(km/10*60), floor(km/4*60)] ∩ [5, 300] 分钟。
+   * 历史上那套「31~39 分钟 + 末位非 0 + 非 5 的倍数」是臆测规则，已删除。
+   */
+  var UNIRUN_MIN_SPEED_KMH = 4;
+  var UNIRUN_MAX_SPEED_KMH = 10;
+  var UNIRUN_MIN_RUNTIME_MIN = 5;
+  var UNIRUN_MAX_RUNTIME_MIN = 300;
+
   var DEFAULTS = {
     dryRun: true,
     accountId: '',
@@ -76,22 +86,24 @@
        * 里程（米）。
        *  - 显式配置（有效数字）→ 用它（向后兼容旧配置/旧测试/手填）；
        *  - 未配置（null/''/undefined）→ 每天从 [runDistanceMin, runDistanceMax] 随机取一个整数，
-       *    默认 1000~1099，且**末位不得为 0**（1000/1100 这类整数会被上游判为异常直接作废）；
-       *    当天固定（持久化在 state.unirunDistance），跨天重新随机。
+       *    默认 1000~1099；当天固定（持久化在 state.unirunDistance），跨天重新随机。
+       *  注意：**没有**「末位不得为 0 / 不能是 5 的倍数」这类限制——那是历史臆测，上游并无此规则。
        */
       runDistance: null,
       runDistanceMin: 1000,
       runDistanceMax: 1099,
       /**
        * 时长（分钟）。
-       *  - 显式配置（有效数字）→ 用它（向后兼容旧配置/旧测试/手填）；
-       *  - 未配置（null/''/undefined）→ 每天从 [runTimeMin, runTimeMax] 随机取整数，
-       *    默认 31~39，且**不能是 5 的倍数**（30/35/40 这类整 5 会被上游判为异常）；
-       *    当天固定（持久化在 state.unirunTime），跨天重新随机。
+       *  - 显式配置（有效数字）→ 用它，但必须满足官方配速（4~10 km/h），否则拦成 pace-out-of-range；
+       *  - 未配置（null/''/undefined）→ **按当日里程推导**：时长区间 = 官方 4~10km/h 可行区间 ∩ [5,300]，
+       *    在其内随机取整数；当天固定（持久化在 state.unirunTime），跨天重新随机。
+       *  - runTimeMin/runTimeMax 默认 null（=不额外限制，只按里程推）。显式给出时与可行区间取**交集**，
+       *    交集为空则明确拦下（不猜、不改写用户值）。不要再用「全局 31~39」这种固定区间：
+       *    它会让 3km 这类长距离直接无解。
        */
       runTime: null,
-      runTimeMin: 31,
-      runTimeMax: 39,
+      runTimeMin: null,
+      runTimeMax: null,
     },
     club: {
       enabled: false,
@@ -116,8 +128,26 @@
        *  - false：只接受 currentSignTask 下发且 activityId 与活动一致时的坐标；
        *  - true ：缺失时允许用活动列表里的 latitude/longitude 兜底，并在结果行 detail 标注 activity-coords。
        * 默认关闭是因为列表坐标可能是另一个校区（用户实测「报到龙泉校区」）。
+       * 注意：真实上游的活动列表/我的任务条目**并不下发 latitude/longitude**（2026-10-23 实测字段全集），
+       * 所以这条兜底在真实数据上常常取不到值；真正可用的兜底是下面的「签到点坐标」。
        */
       allowActivityCoords: false,
+      /**
+       * 签到点坐标兜底（成员自己的签到点，例如学院田径场门口）：
+       * 学校没下发 currentSignTask 坐标时用它提交，结果行标注 coordSource=fallback-coords。
+       * 只在「该活动属于本成员」时使用（跨校区活动已被 club.campusName 拦下）。
+       */
+      fallbackLatitude: '',
+      fallbackLongitude: '',
+      /**
+       * 校区（'' = 不筛选，保持旧行为；'航空港' / '龙泉' = 只报名/签到本校区的活动）。
+       * 上游只在活动名/地址文本里带校区（如「体能锻炼（龙泉）」「龙泉校区第一田径场」），
+       * 没有任何结构化校区别；两个校区的活动在同一天同一时段同时出现在同一份列表里，
+       * 不筛选就会出现「报名到另一个校区 → 本校区活动没有可用签到点 → 龙泉签不上」。
+       */
+      campusName: '',
+      /** true = 允许跨校区（默认 false，避免把记录落到别的校区） */
+      allowOtherCampus: false,
     },
     ek: {
       enabled: false,
@@ -235,7 +265,11 @@
   function parseMoment(value, dateSources) {
     var raw = String(value == null ? '' : value).trim();
     if (!raw) return null;
-    var full = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(raw);
+    /**
+     * 完整时间（含日期）：官方口径是「前缀匹配」，`2026-09-17 18:00:00` / `20260921 18:00` 都要认。
+     * 上游活动列表实测形态：`18:00`（只给时刻）、`2026-11-03 17:30`（官方报名列表）。
+     */
+    var full = /^(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(raw);
     if (full) {
       return beijingToMs(
         Number(full[1]),
@@ -246,18 +280,23 @@
         Number(full[6] || 0),
       );
     }
-    var clock = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(raw);
+    /**
+     * 只有时刻：前缀匹配（官方 clubUtils 口径），`18:00:00.000` / `18:00 至 19:00` 都能取到 18:00。
+     * 历史上要求整串严格等于 `HH:mm[:ss]`，上游只要多带一个 '.' 就整场算不出日期 → missing-date。
+     */
+    var clock = /^(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(raw);
     if (!clock) return null;
     var dateText = null;
     for (var i = 0; i < (dateSources || []).length; i += 1) {
       var src = String(dateSources[i] == null ? '' : dateSources[i]).trim();
-      if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(src)) {
+      // 接受 `2026-09-21` / `2026/9/21` / 紧凑 `20260921`（官方都认）
+      if (/^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{8})(?!\d)/.test(src)) {
         dateText = src;
         break;
       }
     }
     if (!dateText) return null;
-    var dm = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(dateText);
+    var dm = /^(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})/.exec(dateText);
     if (!dm) return null;
     return beijingToMs(
       Number(dm[1]),
@@ -290,8 +329,170 @@
     return Math.max.apply(null, ends);
   }
 
-  function parseClubMoment(value, dateSources) {
-    return parseMoment(value, dateSources || []);
+  /**
+   * 完整日期（`2026-09-21` / `2026/9/21` / 紧凑 `20260921`）→ `YYYY-MM-DD`；否则 ''。
+   * 也接受**日期+时刻**（`2026-09-21 18:00` / `2026-09-21T18:00:30` / `20260921 18:00`）：
+   * 上游 `nextStartTime`/`nextEndTime` 实测就是这种形态，只取其中的日期部分作为日期源；
+   * 时刻部分在这里不参与判定（场次时刻另由 clubHhmmss 单独校验）。
+   * 必须校验**真实日历**：2026-02-30、2026-13-01、2026-04-31 这类不存在的日期一律拒绝，
+   * 否则证据关联会把不存在的日期归一成合法日期而误命中。
+   */
+  function clubFullDateText(value) {
+    var text = String(value == null ? '' : value).trim();
+    var m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)?$/.exec(text);
+    if (!m) m = /^(\d{4})(\d{2})(\d{2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)?$/.exec(text);
+    if (!m) return '';
+    var year = Number(m[1]);
+    var month = Number(m[2]);
+    var day = Number(m[3]);
+    if (year < 2000 || year > 2100) return '';
+    if (month < 1 || month > 12 || day < 1 || day > 31) return '';
+    // 用北京时区回读校验（2-30 之类被 JS 进位后回读不一致 → 丢弃）
+    var back = beijingParts(beijingToMs(year, month, day, 0, 0, 0));
+    if (back.year !== year || back.month !== month || back.day !== day) return '';
+    return year + '-' + pad2(month) + '-' + pad2(day);
+  }
+
+  /**
+   * 俱乐部日期归一（实测 `queryMyActivityList.mmdd = '10-22'` 只有月日）：
+   *  - 完整日期/紧凑 8 位 → 直接归一；
+   *  - 只有 `MM-DD` → 推断年份：取离 today 最近的一次（year-1 / year / year+1），
+   *    并列时取过去，避免跨年把过期任务当成今天；
+   * 解析不出来返回 ''，绝不猜。
+   */
+  function resolveClubDateText(value, todayMs) {
+    var full = clubFullDateText(value);
+    if (full) return full;
+    var text = String(value == null ? '' : value).trim();
+    var md = /^(\d{1,2})[-/](\d{1,2})$/.exec(text);
+    if (!md) return '';
+    var month = Number(md[1]);
+    var day = Number(md[2]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return '';
+    var ref = typeof todayMs === 'number' && isFinite(todayMs) ? todayMs : Date.now();
+    var year = beijingParts(ref).year;
+    var best = null;
+    [year - 1, year, year + 1].forEach(function (y) {
+      var ms = beijingToMs(y, month, day, 0, 0, 0);
+      var p = beijingParts(ms);
+      // 非法日期（2-30 之类被 JS 进位）直接丢弃，不将错就错
+      if (p.month !== month || p.day !== day) return;
+      var dist = Math.abs(ms - ref);
+      if (!best || dist < best.dist || (dist === best.dist && ms < best.ms)) best = { ms: ms, dist: dist, y: y };
+    });
+    if (!best) return '';
+    return best.y + '-' + pad2(month) + '-' + pad2(day);
+  }
+
+  /**
+   * 时刻归一到 `HH:MM:SS`：
+   *  - 时/分/秒必须落在真实范围（24:00、18:60、18:00:60 一律拒绝）；
+   *  - 只吸收等价的小数秒（`.0` / `.000` 全零）；**非零小数秒是不同的瞬间**，
+   *    秒精度表达不了 → 拒绝，绝不截断（否则 18:00:30.5 会误合并成 18:00:30 那个场次）；
+   *  - 秒必须参与比较（18:00:30 与 18:00:00 是不同场次）。
+   */
+  function clubHhmmss(value) {
+    var m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?$/.exec(String(value == null ? '' : value).trim());
+    if (!m) return '';
+    var hour = Number(m[1]);
+    var minute = Number(m[2]);
+    var second = m[3] === undefined ? 0 : Number(m[3]);
+    var frac = m[4] === undefined ? '' : m[4];
+    if (frac && /[^0]/.test(frac)) return '';
+    if (hour > 23 || minute > 59 || second > 59) return '';
+    return pad2(hour) + ':' + pad2(minute) + ':' + pad2(second);
+  }
+
+  /** 活动名归一：全角括号→半角、去所有空白；保留校区字样，绝不做子串/模糊匹配。 */
+  function clubNameKey(value) {
+    return String(value == null ? '' : value)
+      .trim()
+      .replace(/（/g, '(')
+      .replace(/）/g, ')')
+      .replace(/\s+/g, '');
+  }
+
+  /**
+   * 用记录接口（getStudentClubRecord）判断**指定场次**的签到状态。
+   * 记录条目只有 configurationId，与 myTask 的 clubActivityId / configurationTimeId 不是同一 id 空间
+   * → 绝不按 id 对号。必须「活动名（含校区）+ 完整日期 + 开始时刻 + 结束时刻」四元组全等，
+   * 且候选唯一，才采用其 signStatus；缺任一字段或出现多条歧义一律不授权（返回空状态）。
+   * signStatus 语义（实测）：'0'=未签到、'3'=已签到未签退、'1'=已完成。
+   */
+  function clubRecordSignState(records, session) {
+    var out = { status: '', matched: 0, ambiguous: false };
+    if (!Array.isArray(records) || !session) return out;
+    if (!session.name || !session.date || !session.startTime || !session.endTime) return out;
+    var nameKey = clubNameKey(session.name);
+    if (!nameKey) return out;
+    var hits = [];
+    records.forEach(function (item) {
+      if (!item || typeof item !== 'object') return;
+      // 注意：这里不能复用 planClub 内的 activityNameOf（不在本作用域），按同一优先级就地取
+      var itemName = item.activityName != null ? item.activityName : item.ActivityName;
+      if (clubNameKey(itemName) !== nameKey) return;
+      if (clubFullDateText(item.yymmdd) !== session.date) return;
+      if (clubHhmmss(item.startTime) !== session.startTime) return;
+      if (clubHhmmss(item.endTime) !== session.endTime) return;
+      hits.push(String(item.signStatus == null ? '' : item.signStatus).trim());
+    });
+    out.matched = hits.length;
+    if (hits.length !== 1) {
+      out.ambiguous = hits.length > 1;
+      return out;
+    }
+    out.status = hits[0] === '0' || hits[0] === '1' || hits[0] === '3' ? hits[0] : '';
+    return out;
+  }
+
+  /**
+   * `value` 自带完整日期+时刻时，直接按**真实日历/时钟**构造，不交给 parseMoment 的进位兜底：
+   * parseMoment 用前缀正则 + Date.UTC，`2026-02-30 18:00` 会被静默进位成 `2026-03-02 18:00`，
+   * 那等于把不存在的场次算成存在，签退窗口就会落到错误的日期上。
+   * 非法（日历/时钟越界、非零小数秒）→ null，绝不猜。
+   */
+  function clubDateTimeMs(value) {
+    var text = String(value == null ? '' : value).trim();
+    var m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?$/.exec(text);
+    if (!m) return null;
+    var year = Number(m[1]);
+    var month = Number(m[2]);
+    var day = Number(m[3]);
+    var hour = Number(m[4]);
+    var minute = Number(m[5]);
+    var second = m[6] === undefined ? 0 : Number(m[6]);
+    var frac = m[7] === undefined ? '' : m[7];
+    if (frac && /[^0]/.test(frac)) return null;
+    if (year < 2000 || year > 2100) return null;
+    if (hour > 23 || minute > 59 || second > 59) return null;
+    var ms = beijingToMs(year, month, day, hour, minute, second);
+    var back = beijingParts(ms);
+    if (back.year !== year || back.month !== month || back.day !== day) return null;
+    if (back.hour !== hour || back.minute !== minute || back.second !== second) return null;
+    return ms;
+  }
+
+  function parseClubMoment(value, dateSources, todayMs) {
+    var sources = dateSources || [];
+    var ref = typeof todayMs === 'number' && isFinite(todayMs) ? todayMs : Date.now();
+    // 0) value 自己就带完整日期+时刻 → 走严格校验（日历/时钟），绝不 rollover
+    if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]/.test(String(value == null ? '' : value).trim())) {
+      return clubDateTimeMs(value);
+    }
+    // 1) 完整日期优先：只要有完整日期，就不用推断出来的 MM-DD
+    var resolved = [];
+    sources.forEach(function (s) {
+      var full = clubFullDateText(s);
+      if (full && resolved.indexOf(full) < 0) resolved.push(full);
+    });
+    // 2) 没有完整日期时才做 MM-DD 推断
+    if (!resolved.length) {
+      sources.forEach(function (s) {
+        var d = resolveClubDateText(s, ref);
+        if (d && resolved.indexOf(d) < 0) resolved.push(d);
+      });
+    }
+    return parseMoment(value, resolved);
   }
 
   // ─────────────────────────── 业务判定 ───────────────────────────
@@ -471,6 +672,59 @@
     return s === '1' || s === 'true' || s === '已完成' || s === '已签到' || s === '已签退';
   }
 
+  /**
+   * 俱乐部活动的可读文本（校区只存在于文本里，没有任何结构化字段）。
+   * 真实上游条目字段：activityName（如「体能锻炼（龙泉）」）、addressDetail（如「龙泉校区第一田径场」）。
+   */
+  function clubText(item) {
+    if (!item) return '';
+    return ['activityName', 'ActivityName', 'address', 'addressDetail', 'itemName', 'clubIntroduction', 'teacherName']
+      .map(function (k) {
+        return item[k] == null ? '' : String(item[k]);
+      })
+      .join(' ');
+  }
+
+  /** 从活动文本里识别校区：'航空港' / '龙泉' / ''（识别不出） */
+  function clubCampusOf(item) {
+    var text = clubText(item);
+    if (!text) return '';
+    if (text.indexOf('航空港') >= 0) return '航空港';
+    if (text.indexOf('龙泉') >= 0) return '龙泉';
+    return '';
+  }
+
+  /**
+   * 校区闸门：配置了成员校区且未开 allowOtherCampus 时，只放行「本校区」或「识别不出校区」的活动。
+   * 识别不出时放行（宁可多签一场，也不因文本变化误杀）。
+   */
+  function clubPassesCampus(item, cfg) {
+    var member = String((cfg && cfg.campusName) || '').trim();
+    if (!member) return true;
+    if (cfg && cfg.allowOtherCampus === true) return true;
+    var found = clubCampusOf(item);
+    if (!found) return true;
+    return found === member;
+  }
+
+  /**
+   * 清除某天的俱乐部重试计数（供 UI「清除今日失败锁定」调用）。
+   * 只清 state.failed 而不清 clubChecks，会让用户「清了也永远停在 club-attempts-exhausted」。
+   */
+  function clearClubCheckLocks(state, dayText) {
+    var day = String(dayText || '').trim();
+    var src = state && state.clubChecks && typeof state.clubChecks === 'object' ? state.clubChecks : null;
+    if (!src) return 0;
+    var removed = 0;
+    Object.keys(src).forEach(function (k) {
+      if (!day || k.indexOf(day + '|') === 0) {
+        delete src[k];
+        removed += 1;
+      }
+    });
+    return removed;
+  }
+
   function extractList(res) {
     if (!res || typeof res !== 'object') return null;
     var body = res.response && typeof res.response === 'object' ? res.response : res;
@@ -536,22 +790,79 @@
 
   /**
    * 统一脱敏口径（sanitizeError / 上游失败原因共用）：
-   *  - password / token / JSESSIONID 等键值对一律打码；
-   *  - 完整手机号打码；
+   *  - 凭证：裸 `key=value`、**带引号的 JSON 键**（`{"password":"..."}`）、
+   *    camelCase 变体（accessToken/refreshToken/oauthToken）、`Authorization: Bearer xxx` 一律打码；
+   *  - 手机号打码；
+   *  - 路径：只遮用户名（保留 ENOENT 语义与文件名，便于定位问题），栈帧整体截断；
    *  - 压缩空白并截断，避免把整包响应写进日志/结果。
    */
   function redactText(text, maxLen) {
-    return String(text == null ? '' : text)
-      .replace(/(password|access_token|refresh_token|JSESSIONID|token)\s*[:=]\s*[^\s,;]+/gi, '$1=***')
+    var out = String(text == null ? '' : text);
+    // 1) 栈帧：`\n    at fn (path)` 之后全部丢弃（路径/用户名都藏在栈里，且对定位无用）
+    var stackAt = out.search(/\n\s+at\s+/);
+    if (stackAt > 0) out = out.slice(0, stackAt);
+    return out
+      // 2) 带引号的值：**先于任何 Bearer 规则**，把整段引号内容一起打码。
+      //    值里可能含空格（`{"password":"my secret pass"}`）甚至内嵌 Bearer
+      //    （`{"Authorization":"Bearer eyJ.a b"}`）——若让 Bearer 规则先跑，它只会吃掉
+      //    `Bearer eyJ.a` 这一段，剩下 ` b` 这类短尾巴（低于裸值「吞后续 token」阈值）
+      //    就会原样留在日志/结果里。
+      .replace(
+        /(password|passwd|pwd|access[_]?token|refresh[_]?token|id[_]?token|oauth[_]?token|jsessionid|authorization|secret|otp|captcha|token)(["']?\s*[:=]\s*)(["'])([\s\S]*?)\3/gi,
+        '$1=***',
+      )
+      // 3) `Authorization: Bearer <token>` 整体吃掉（先于通用 Bearer，避免留下 `Bearer *** ***`）
+      .replace(/\bauthorization["']?\s*[:=]\s*["']?Bearer\s+[A-Za-z0-9\-._~+/=]+/gi, 'authorization=***')
+      // 4) 裸 Bearer 令牌
+      .replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]+/gi, 'Bearer ***')
+      // 5) 裸 key=value：先吃掉首个 token，再吞掉紧随其后、看起来仍是密钥片段的若干 token
+      //    （避免 `password=abc def ghi` 只遮住 `abc`；中文诊断文字不含空格，不会被误吞）
+      .replace(
+        /(password|passwd|pwd|access[_]?token|refresh[_]?token|id[_]?token|oauth[_]?token|jsessionid|authorization|secret|otp|captcha|token)["']?\s*[:=]\s*["']?[^\s,;&"'}]+((?:\s+[A-Za-z0-9._~+/=!@#$%^*\-]{3,}){0,3})/gi,
+        '$1=***',
+      )
+      // 6) 用户名遮罩（保留路径其余部分与文件名）：用户名本身可能含空格，不能按空格截断
+      .replace(/([A-Za-z]:\\Users\\)[^\\"']+(?=\\|["']|$)/g, '$1<user>')
+      .replace(/(\/Users\/|\/home\/)[^\/"'\n]+(?=\/|["']|$)/g, '$1<user>')
       .replace(/\b1[3-9]\d{9}\b/g, '1**********')
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, maxLen || 200);
   }
 
+  /**
+   * 异常 → 可落盘的脱敏原因。
+   * 纯字符串 throw 必须保留（Electron 的 ipcRenderer.invoke rejection 常是字符串）；
+   * 有 message 用 message；其它对象只取 code/name，绝不喂整对象（避免整包响应进日志）。
+   */
   function sanitizeError(e) {
-    var text = e && e.message ? String(e.message) : String(e == null ? '' : e);
+    var text = '';
+    if (typeof e === 'string') text = e;
+    else if (e && e.message) text = String(e.message);
+    else if (e && (e.code || e.name)) text = String(e.code || e.name);
     return redactText(text, 140);
+  }
+
+  /**
+   * 提交阶段抛异常（非业务响应）的原因分类。
+   * 只产出固定的安全文案码：原始异常文本只经 sanitizeError 脱敏后进 detail，绝不进 reason。
+   * 分类不确定时保持既有 `submission-result-unknown`，避免被误判成可重试失败。
+   */
+  function classifyThrownReason(e) {
+    var text = e && e.message ? String(e.message) : String(e == null ? '' : e);
+    if (/timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|网络|fetch failed|socket/i.test(text)) {
+      return 'submission-network-error';
+    }
+    if (/\b401\b|\b403\b|未登录|请登录|重新登录|登录已|会话|鉴权|unauthorized|forbidden/i.test(text)) {
+      return 'submission-auth-error';
+    }
+    if (/坐标|定位|latitude|longitude|不在.{0,6}范围|超出.{0,6}范围/i.test(text)) {
+      return 'submission-coordinate-error';
+    }
+    if (/未开始|已结束|未报名|未签到|活动不存在|任务不存在|不满足|前置/.test(text)) {
+      return 'submission-precondition-error';
+    }
+    return 'submission-result-unknown';
   }
 
   /** 从响应里取第一个非空文本字段（不整包 JSON 落盘，只取明确的报错文案） */
@@ -1277,7 +1588,7 @@
           emitResult(meta, status, reason, failureDetail);
           // 合并 meta 中的安全诊断字段，便于日志定位
           var diagExtra = { key: key };
-          ['accountId', 'activityName', 'category', 'listStatus', 'classify', 'decision', 'scoreGate', 'applyWindowStart', 'applyWindowEnd', 'stage', 'distanceMeters', 'windowMinutes', 'runTime', 'signWay', 'photo', 'captchaFrom', 'coordSource'].forEach(function (k) {
+          ['accountId', 'activityName', 'category', 'listStatus', 'classify', 'decision', 'scoreGate', 'applyWindowStart', 'applyWindowEnd', 'stage', 'distanceMeters', 'windowMinutes', 'runTime', 'signWay', 'photo', 'captchaFrom', 'coordSource', 'dateSource', 'signInEvidence'].forEach(function (k) {
             if (meta[k] !== undefined) diagExtra[k] = meta[k];
           });
           if (failureDetail) diagExtra.detail = failureDetail;
@@ -1291,16 +1602,24 @@
         })
         .catch(function (e) {
           delete state.inflight[key];
-          state.failed[key] = { status: 'unknown', at: now() };
+          // 异常原因必须保留（脱敏+截断）：否则当天永久锁死却让用户无从判断原因
+          var caughtDetail = sanitizeError(e);
+          var caughtReason = classifyThrownReason(e);
+          state.failed[key] = { status: 'unknown', at: now(), lastError: caughtDetail };
           try {
             saveState(state);
           } catch (err) {
             logger.log('[storage] unknown 状态落盘失败：' + sanitizeError(err));
           }
-          logger.log('[' + meta.module + '] ' + meta.action + ' ' + String(meta.activityId) + ' → unknown');
-          // 固定文案：不把原始异常拼进结果/历史（避免潜在敏感内容外泄）
-          emitResult(meta, 'unknown', 'submission-result-unknown');
-          return row(meta.module, meta.action, meta.activityId, 'unknown', 'submission-result-unknown', { key: key });
+          logger.log(
+            '[' + meta.module + '] ' + meta.action + ' ' + String(meta.activityId) + ' → unknown'
+              + (caughtDetail ? ' 原因：' + caughtDetail : ''),
+          );
+          // reason 只用固定分类码；原始异常仅以脱敏 detail 暴露，避免凭证/整包响应外泄
+          emitResult(meta, 'unknown', caughtReason, caughtDetail);
+          var unknownExtra = { key: key };
+          if (caughtDetail) unknownExtra.detail = caughtDetail;
+          return row(meta.module, meta.action, meta.activityId, 'unknown', caughtReason, unknownExtra);
         });
     }
 
@@ -1439,26 +1758,40 @@
       return String(dateStr) + '|' + String(account || 'local');
     }
 
-    /**
-     * 末位数不能为 0：上游会把 1000/1100 这类整数里程判为异常直接作废，
-     * 所以随机值必须"带个位数"（如 1043 / 987 / 1096）。
-     * 在 [min,max] 闭区间内随机，若刚好落在 10 的倍数上则平移 1 米修正（仍在区间内）。
-     */
-    function pickDistanceWithOnesDigit(minM, maxM) {
-      var span = maxM - minM + 1;
+    /** 闭区间内取整数随机值（[min,max] 都含端点）。 */
+    function pickIntInRange(minV, maxV) {
+      var span = maxV - minV + 1;
       var rand = typeof opts.random === 'function' ? opts.random() : Math.random();
       var unit = Number(rand);
       if (!Number.isFinite(unit) || unit < 0) unit = 0;
       if (unit >= 1) unit = 0.9999999999;
-      var picked = minM + Math.floor(unit * span);
-      if (picked < minM) picked = minM;
-      if (picked > maxM) picked = maxM;
-      if (picked % 10 === 0) {
-        // 优先 +1（区间内），否则 -1；两端都被占满时说明区间退化，直接用原值
-        if (picked + 1 <= maxM) picked += 1;
-        else if (picked - 1 >= minM) picked -= 1;
-      }
+      var picked = minV + Math.floor(unit * span);
+      if (picked < minV) picked = minV;
+      if (picked > maxV) picked = maxV;
       return picked;
+    }
+
+    /**
+     * 官方配速契约（与上游一致）：时长必须落在 **4~10 km/h** 对应的区间
+     *   `[ceil(km/10*60), floor(km/4*60)]`，再与全局 `[5, 300]` 分钟取交。
+     * 例：1000m → 6~15 分钟；1100m → 7~16 分钟；3000m → 18~45 分钟。
+     * 区间为空（里程过小/过大）返回 null，调用方必须拦下而不是猜一个值。
+     */
+    function unirunPaceRange(distanceMeters) {
+      var km = Number(distanceMeters) / 1000;
+      if (!(km > 0) || !isFinite(km)) return null;
+      var lo = Math.max(Math.ceil((km / UNIRUN_MAX_SPEED_KMH) * 60), UNIRUN_MIN_RUNTIME_MIN);
+      var hi = Math.min(Math.floor((km / UNIRUN_MIN_SPEED_KMH) * 60), UNIRUN_MAX_RUNTIME_MIN);
+      if (!(lo <= hi)) return null;
+      return { min: lo, max: hi };
+    }
+
+    function isPaceValid(distanceMeters, runTime) {
+      var range = unirunPaceRange(distanceMeters);
+      if (!range) return false;
+      var n = Number(runTime);
+      if (!isFinite(n)) return false;
+      return n >= range.min && n <= range.max;
     }
 
     /**
@@ -1467,7 +1800,7 @@
      * 优先级与口径：
      *  1. `config.unirun.runDistance` 显式为有效数字 → 直接用它（向后兼容手填/旧配置/旧测试）。
      *  2. 否则用 `[runDistanceMin, runDistanceMax]`（默认 1000~1099）随机取整数：
-     *     - **末位不得为 0**：上游把 1000/1100 这类整数里程判为异常直接作废；随机到 10 的倍数会平移 1 米；
+     *     - 里程**不做任何末位限制**（「末位非 0」是历史臆测，上游无此规则）；真正约束在时长一侧的 4~10km/h 配速；
      *     - **当天固定**：持久化到 `state.unirunDistance[<date>|<account>]`，同一天同一账号重复 tick 复用；
      *     - 跨天用新日期键 → 自然重新随机；
      *     - 随机值**必须在提交前落盘成功**（fail-closed，写失败不提交）。
@@ -1504,17 +1837,18 @@
       maxM = Math.round(maxM);
       if (minM > maxM) return { ok: false, reason: 'invalid-run-params' };
 
-      // 3) 当天固定：已有持久值直接复用（同样拒绝末位 0 的历史脏值）
+      // 3) 当天固定：已有持久值直接复用，但必须仍然落在**当前** [min,max] 内
+      //    （用户改过 runDistanceMin/Max 之后，旧缓存越界不得继续用）
       var dateStr = beijingDateString(now());
       var stateKey = unirunDistanceStateKey(dateStr, account);
       state.unirunDistance = state.unirunDistance && typeof state.unirunDistance === 'object' ? state.unirunDistance : {};
-      var cached = numInRange(state.unirunDistance[stateKey], 1000, 10000);
-      if (cached !== null && Math.round(cached) % 10 !== 0) {
+      var cached = numInRange(state.unirunDistance[stateKey], minM, maxM);
+      if (cached !== null) {
         return { ok: true, runDistance: Math.round(cached), persisted: false };
       }
 
-      // 4) 首次随机（末位非 0）
-      var picked = pickDistanceWithOnesDigit(minM, maxM);
+      // 4) 首次随机（[min,max] 闭区间，不再对末位做任何人为修正）
+      var picked = pickIntInRange(minM, maxM);
 
       // 5) fail-closed：先落盘成功才作为「当天固定值」使用
       state.unirunDistance[stateKey] = picked;
@@ -1528,81 +1862,90 @@
         logger.log('[storage] 校园跑随机里程落盘失败，已阻止本轮提交：' + sanitizeError(e));
         return { ok: false, reason: 'storage-error' };
       }
-      logger.log('[unirun] 今日随机里程为 ' + picked + ' 米（' + minM + '~' + maxM + '，末位非 0）');
+      logger.log('[unirun] 今日随机里程为 ' + picked + ' 米（' + minM + '~' + maxM + '）');
       return { ok: true, runDistance: picked, persisted: true };
     }
 
     /**
-     * 当天「时长（分钟）」随机值：与里程同一套模式，额外保证**不是 5 的倍数**。
-     * 30/35/40 这类整 5 的时长更像脚本默认值，用户明确要求避开。
+     * 当天「时长（分钟）」随机值的 state 键：`<date>|<account>`（与里程/窗口同一口径，账号隔离）。
      */
     function unirunTimeStateKey(dateStr, account) {
       return String(dateStr) + '|' + String(account || 'local');
     }
 
-    function pickMinutesNotMultipleOf5(minM, maxM) {
-      var span = maxM - minM + 1;
-      var rand = typeof opts.random === 'function' ? opts.random() : Math.random();
-      var unit = Number(rand);
-      if (!Number.isFinite(unit) || unit < 0) unit = 0;
-      if (unit >= 1) unit = 0.9999999999;
-      var picked = minM + Math.floor(unit * span);
-      if (picked < minM) picked = minM;
-      if (picked > maxM) picked = maxM;
-      if (picked % 5 === 0) {
-        // 优先 +1（区间内），否则 -1；保证永远不是 5 的倍数
-        if (picked + 1 <= maxM) picked += 1;
-        else if (picked - 1 >= minM) picked -= 1;
-      }
-      return picked;
-    }
-
     /**
-     * 解析本次运行应使用的时长（分钟）。
+     * 解析本次运行应使用的时长（分钟）——**必须同时满足官方配速 4~10km/h**。
      *
-     * 优先级与口径与里程完全同构：
-     *  1. 显式配置优先（向后兼容）；
-     *  2. 否则 `[runTimeMin, runTimeMax]`（默认 31~39）随机，**排除 5 的倍数**；
-     *  3. 当天固定（`state.unirunTime`），跨天重随机；
-     *  4. fail-closed：落盘失败不提交。
+     * 口径：
+     *  1. 先由里程算出可行区间 `pace = [ceil(km/10*60), floor(km/4*60)] ∩ [5,300]`；
+     *  2. 显式 `runTime` → 必须在 pace 内，否则 `pace-out-of-range`（**不改写用户值**，交给 UI 让用户自己改）；
+     *  3. 否则区间 = pace ∩ 显式 `[runTimeMin, runTimeMax]`（默认都 null = 不额外限制）；
+     *     交集为空 → `pace-out-of-range`（明确拦，不猜）；
+     *  4. 当天固定（`state.unirunTime`）：缓存必须 pace 合法**且**落在当前有效区间才复用，否则重算并落盘；
+     *  5. fail-closed：落盘失败不提交。
+     *
+     * @returns {{ok:boolean, runTime?:number, reason?:string, persisted?:boolean,
+     *            detail?:{distanceMeters:number, runTime?:number, suggestedMin:number, suggestedMax:number}}}
      */
-    function resolveUnirunTime(state, config, account) {
+    function resolveUnirunTime(state, config, account, runDistance) {
       var u = config.unirun || {};
+      var distance = Number(runDistance);
+      var pace = unirunPaceRange(distance);
+      if (!pace) return { ok: false, reason: 'invalid-run-params' };
 
+      function paceBlocked(explicitTime) {
+        var detail = { distanceMeters: Math.round(distance), suggestedMin: pace.min, suggestedMax: pace.max };
+        if (explicitTime !== undefined) detail.runTime = explicitTime;
+        return { ok: false, reason: 'pace-out-of-range', detail: detail };
+      }
+
+      // 1) 显式时长：只拦不改写
       var explicitRaw = u.runTime;
-      var explicit = null;
       if (explicitRaw !== null && explicitRaw !== undefined && String(explicitRaw).trim() !== '') {
-        explicit = numInRange(explicitRaw, 5, 300);
+        var explicit = numInRange(explicitRaw, UNIRUN_MIN_RUNTIME_MIN, UNIRUN_MAX_RUNTIME_MIN);
         if (explicit === null) {
           return { ok: false, reason: 'invalid-run-params' };
         }
-        return { ok: true, runTime: Math.round(explicit), persisted: false };
+        var explicitTime = Math.round(explicit);
+        if (!isPaceValid(distance, explicitTime)) return paceBlocked(explicitTime);
+        return { ok: true, runTime: explicitTime, persisted: false };
       }
 
-      var minRaw = u.runTimeMin === undefined || u.runTimeMin === null
-        ? DEFAULTS.unirun.runTimeMin
-        : u.runTimeMin;
-      var maxRaw = u.runTimeMax === undefined || u.runTimeMax === null
-        ? DEFAULTS.unirun.runTimeMax
-        : u.runTimeMax;
-      var minMin = numInRange(minRaw, 5, 300);
-      var maxMin = numInRange(maxRaw, 5, 300);
-      if (minMin === null || maxMin === null || minMin > maxMin) {
-        return { ok: false, reason: 'invalid-run-params' };
+      // 2) 有效区间 = pace ∩ 显式 [runTimeMin, runTimeMax]（显式非法 → invalid-run-params）
+      var lo = pace.min;
+      var hi = pace.max;
+      var boundMin = null;
+      var boundMax = null;
+      if (u.runTimeMin !== null && u.runTimeMin !== undefined && String(u.runTimeMin).trim() !== '') {
+        boundMin = numInRange(u.runTimeMin, UNIRUN_MIN_RUNTIME_MIN, UNIRUN_MAX_RUNTIME_MIN);
+        if (boundMin === null) return { ok: false, reason: 'invalid-run-params' };
+        boundMin = Math.round(boundMin);
       }
-      minMin = Math.round(minMin);
-      maxMin = Math.round(maxMin);
-      if (minMin > maxMin) return { ok: false, reason: 'invalid-run-params' };
+      if (u.runTimeMax !== null && u.runTimeMax !== undefined && String(u.runTimeMax).trim() !== '') {
+        boundMax = numInRange(u.runTimeMax, UNIRUN_MIN_RUNTIME_MIN, UNIRUN_MAX_RUNTIME_MIN);
+        if (boundMax === null) return { ok: false, reason: 'invalid-run-params' };
+        boundMax = Math.round(boundMax);
+      }
+      if (boundMin !== null) lo = Math.max(lo, boundMin);
+      if (boundMax !== null) hi = Math.min(hi, boundMax);
+      if (lo > hi) return paceBlocked();
 
+      // 3) 当天固定：缓存必须 pace 合法且落在当前有效区间
       var dateStr = beijingDateString(now());
       var stateKey = unirunTimeStateKey(dateStr, account);
       state.unirunTime = state.unirunTime && typeof state.unirunTime === 'object' ? state.unirunTime : {};
-      var cached = numInRange(state.unirunTime[stateKey], 5, 300);
-      if (cached !== null && Math.round(cached) % 5 !== 0) {
-        return { ok: true, runTime: Math.round(cached), persisted: false };
+      var cached = numInRange(state.unirunTime[stateKey], UNIRUN_MIN_RUNTIME_MIN, UNIRUN_MAX_RUNTIME_MIN);
+      if (cached !== null) {
+        var cachedTime = Math.round(cached);
+        if (isPaceValid(distance, cachedTime) && cachedTime >= lo && cachedTime <= hi) {
+          return { ok: true, runTime: cachedTime, persisted: false };
+        }
       }
 
-      var picked = pickMinutesNotMultipleOf5(minMin, maxMin);
+      // 4) 随机取有效区间内的整数，再复检一次 pace（防区间算法漂移）
+      var picked = pickIntInRange(lo, hi);
+      if (!isPaceValid(distance, picked)) return paceBlocked(picked);
+
       state.unirunTime[stateKey] = picked;
       if (previewMode) {
         return { ok: true, runTime: picked, persisted: false, preview: true };
@@ -1614,7 +1957,10 @@
         logger.log('[storage] 校园跑随机时长落盘失败，已阻止本轮提交：' + sanitizeError(e));
         return { ok: false, reason: 'storage-error' };
       }
-      logger.log('[unirun] 今日随机时长为 ' + picked + ' 分钟（' + minMin + '~' + maxMin + '，非 5 的倍数）');
+      logger.log(
+        '[unirun] 今日随机时长为 ' + picked + ' 分钟（' + distance + ' 米 → 有效区间 ' + lo + '~' + hi
+          + ' 分钟，对应 ' + UNIRUN_MIN_SPEED_KMH + '~' + UNIRUN_MAX_SPEED_KMH + 'km/h）',
+      );
       return { ok: true, runTime: picked, persisted: true };
     }
 
@@ -1648,16 +1994,29 @@
         return Promise.resolve();
       }
       var windowMin = window.windowMinutes;
-      // 里程：显式配置优先，否则当天随机且末位非 0（1000/1100 这类整数会被上游作废）
+      // 里程：显式配置优先，否则当天在 [runDistanceMin, runDistanceMax] 随机
       var distance = resolveUnirunDistance(state, config, account);
       if (!distance.ok) {
         results.push(row('unirun', 'autoRun', '', 'failed', distance.reason || 'invalid-run-params'));
         return Promise.resolve();
       }
       var runDistance = distance.runDistance;
-      // 时长：显式配置优先，否则当天随机 31~39 且不是 5 的倍数
-      var duration = resolveUnirunTime(state, config, account);
+      // 时长：必须满足官方 4~10km/h（随里程推区间）；显式越界 → 拦下并给人类可读建议区间
+      var duration = resolveUnirunTime(state, config, account, runDistance);
       if (!duration.ok) {
+        if (duration.reason === 'pace-out-of-range') {
+          var paceDetail = duration.detail || {};
+          var suggested = paceDetail.suggestedMin + '~' + paceDetail.suggestedMax;
+          results.push(row('unirun', 'autoRun', '', 'waiting-material', 'pace-out-of-range', {
+            distanceMeters: runDistance,
+            runTime: paceDetail.runTime === undefined ? null : paceDetail.runTime,
+            suggestedMin: paceDetail.suggestedMin,
+            suggestedMax: paceDetail.suggestedMax,
+            detail: '里程 ' + runDistance + ' 米只支持 ' + suggested + ' 分钟（官方配速 '
+              + UNIRUN_MIN_SPEED_KMH + '~' + UNIRUN_MAX_SPEED_KMH + 'km/h），请调整里程或时长后再跑',
+          }));
+          return Promise.resolve();
+        }
         results.push(row('unirun', 'autoRun', '', 'failed', duration.reason || 'invalid-run-params'));
         return Promise.resolve();
       }
@@ -1757,9 +2116,13 @@
         results.push(row('club', 'list', '', 'waiting-material', 'no-unirun-account'));
         return Promise.resolve();
       }
-      if (!passesKeyword({}, config.club) && (config.club.keywords || []).length === 0) {
+      /**
+       * 关键词闸门只约束「新增报名」：已报名活动的签到/签退必须继续执行。
+       * 历史实现是整段早退，导致「报名了但没签到」（与二课 2116-2122 的口径不一致，这里对齐：只告警不早退）。
+       */
+      var keywordGateOff = (config.club.keywords || []).length === 0 && config.club.allowAll !== true;
+      if (keywordGateOff) {
         results.push(row('club', 'list', '', 'waiting-material', 'need-keywords'));
-        return Promise.resolve();
       }
       var account = accountFor(config, 'club');
       var cred = { phone: u.phone, password: u.password };
@@ -1778,12 +2141,11 @@
         .then(function () {
           var dates = [today];
           myTasks.forEach(function (item) {
-            [item && item.nextMmdd, item && item.yymmdd].forEach(function (d) {
-              var text = String(d == null ? '' : d).trim();
-              if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(text)) {
-                var norm = text.replace(/\//g, '-');
-                if (dates.indexOf(norm) < 0) dates.push(norm);
-              }
+            // 真实字段：nextMmdd / mmdd（实测 `10-22` 只有月日）/ 历史 yymmdd；
+            // 统一归一成完整日期再当 queryDate，MM-DD 按「离今天最近、并列取过去」推断
+            [item && item.nextMmdd, item && item.mmdd, item && item.yymmdd].forEach(function (d) {
+              var norm = resolveClubDateText(d, now());
+              if (norm && dates.indexOf(norm) < 0) dates.push(norm);
             });
           });
           var chain = Promise.resolve();
@@ -1814,8 +2176,8 @@
 
           var ops = [];
 
-          // 1) 报名：可报名(6)、关键词通过、每日成功数受 dailyJoinLimit 限制
-          if (config.club.join) {
+          // 1) 报名：可报名(6)、关键词通过、本校区、每日成功数受 dailyJoinLimit 限制
+          if (config.club.join && !keywordGateOff) {
             var limit = Math.max(0, Number(config.club.dailyJoinLimit) || 0);
             var countKey = dailyKey(today, account, 'club', 'join');
             var joinedToday = dailyCount(state, countKey);
@@ -1824,6 +2186,15 @@
               var id = Number(idText);
               if (myIds[id]) return;
               if (clubEffectiveStatus(item) !== '6') return;
+              // 校区闸门：同一天两个校区各有一场同时段活动，不筛就会报名到另一个校区
+              if (!clubPassesCampus(item, config.club)) {
+                results.push(row('club', 'join', id, 'skipped', 'other-campus', {
+                  activityName: activityNameOf(item),
+                  campus: clubCampusOf(item),
+                  memberCampus: String(config.club.campusName || ''),
+                }));
+                return;
+              }
               if (!passesKeyword(item, config.club)) return;
               if (limit > 0 && joinedToday >= limit) return;
               joinedToday += 1;
@@ -1864,9 +2235,41 @@
 
           // 2) 签到 / 签退
           if (config.club.signIn || config.club.signOut) {
-            ops.push(
-              Promise.resolve(api.club.currentSignTask(cred))
+            /**
+             * 记录接口（getStudentClubRecord）提供**外部签到证据**：它是「人已在手机上签到」的独立来源，
+             * 与 getSignInTf 任务口径互为补充——当前任务可能缺少阶段状态（窗口外实测恒为全 null），
+             * 只靠任务口径会永远判 need-sign-in-first。
+             * 注意口径边界：历史证据只证明「窗口外/无进行中任务时 getSignInTf 下发 null」，
+             * **不能**推断「手机签到后任务一定消失」，所以两条证据都要用，谁都不当唯一权威。
+             * 这里只做**补充证据**：接口缺失/失败一律当没有，绝不因此降级本地 done 或任务证据。
+             */
+            var clubRecords = [];
+            var recordsLoaded = typeof api.club.studentRecord === 'function'
+              ? Promise.resolve()
+                .then(function () {
+                  return api.club.studentRecord(cred);
+                })
                 .then(function (res) {
+                  // 只认成功码：失败码即使带残留 response（伪 record）也一律忽略
+                  if (!isClubSuccess(res)) {
+                    logger.log('[club] 记录接口未返回成功码，忽略外部签到证据');
+                    return;
+                  }
+                  var list = extractList(res);
+                  if (list) clubRecords = list;
+                })
+                .catch(function (e) {
+                  logger.log('[club] 记录接口不可用，忽略外部签到证据：' + sanitizeError(e));
+                })
+              : Promise.resolve();
+            ops.push(
+              recordsLoaded
+                .then(function () {
+                  return api.club.currentSignTask(cred);
+                })
+                .then(function (res) {
+                  // 只认成功码：失败码带残留 response（伪坐标/伪已签到）不得采信
+                  if (!isClubSuccess(res)) return null;
                   return res && res.response && typeof res.response === 'object' ? res.response : null;
                 })
                 .catch(function () {
@@ -1876,75 +2279,140 @@
                   var inner = [];
                   myTasks.forEach(function (taskItem) {
                     var id = clubActivityId(taskItem);
-                    if (!id) return;
-                    var status = clubEffectiveStatus(taskItem);
-                    if (status !== '1' && status !== '2') return;
-                    var listed = activityById[id] || null;
+                    var listed = id ? activityById[id] || null : null;
                     var base = listed || taskItem;
+                    var name = activityNameOf(taskItem, base);
+                    if (!id) {
+                      // 静默会掩盖上游字段变化：没有可用活动 id 也要留一行（历史实现直接 return）
+                      results.push(row('club', 'signIn', '', 'skipped', 'missing-activity-id', { activityName: name }));
+                      return;
+                    }
+                    // 校区闸门：另一个校区的活动不报名也不签到（否则记录会落到别的校区）
+                    if (!clubPassesCampus(base, config.club)) {
+                      results.push(row('club', 'signIn', id, 'skipped', 'other-campus', {
+                        activityName: name,
+                        campus: clubCampusOf(base),
+                        memberCampus: String(config.club.campusName || ''),
+                      }));
+                      return;
+                    }
 
-                    // 日期来源：nextMmdd → yymmdd → 同 id 的「今天活动列表」查询日期；
+                    // 日期来源：nextMmdd → mmdd → yymmdd → 同 id 的「今天活动列表」查询日期；
                     // 不无条件用 today，避免把过期任务当成今天。
-                    var dateSources = [taskItem.nextMmdd, taskItem.yymmdd];
+                    var dateSources = [taskItem.nextMmdd, taskItem.mmdd, taskItem.yymmdd,
+                      taskItem.nextStartTime, taskItem.nextEndTime];
                     if (listed && listed.__queryDate) dateSources.push(listed.__queryDate);
 
-                    var startMs = parseClubMoment(base.startTime || taskItem.startTime, dateSources);
-                    var endMs = parseClubMoment(base.endTime || taskItem.endTime, dateSources);
+                    var startMs = parseClubMoment(base.startTime || taskItem.startTime || taskItem.nextStartTime, dateSources, now());
+                    var endMs = parseClubMoment(base.endTime || taskItem.endTime || taskItem.nextEndTime, dateSources, now());
+
+                    var sameTask = Boolean(currentTask) && clubActivityId(currentTask) === id;
+
+                    /**
+                     * 记录接口补充证据（外部/手机端签到）：必须与**本场次**严格匹配——
+                     * 活动名（含校区）+ 完整日期 + 开始时刻 + 结束时刻四元组全等且唯一命中。
+                     * 历史同 id/同名的其它日期记录一律不授权今日签退。
+                     */
+                    var sessionStartText = base.startTime || taskItem.startTime || taskItem.nextStartTime;
+                    var sessionEndText = base.endTime || taskItem.endTime || taskItem.nextEndTime;
+                    var recordState = clubRecordSignState(clubRecords, {
+                      name: name,
+                      date: startMs === null ? '' : beijingDateString(startMs),
+                      startTime: clubHhmmss(sessionStartText),
+                      endTime: clubHhmmss(sessionEndText),
+                    });
+                    var recordCompleted = recordState.status === '1';
+                    var recordSignedIn = recordState.status === '3' || recordCompleted;
+                    var dateSource = '';
+                    if (startMs !== null) {
+                      dateSource = dateSources.some(function (s) {
+                        return Boolean(clubFullDateText(s));
+                      })
+                        ? 'full-date'
+                        : 'mmdd-inferred';
+                    }
+
+                    /**
+                     * 官方已签到/签退信号：签到任务口径优先，再补列表口径（任一来源说「已签」即视为已签）。
+                     * 只看列表条目会漏掉「人已经在手机上签过」→ 重复提交被学校拒绝 → 白烧当天重试预算。
+                     * 注意**不能用**列表条目的 `signStatus`：实测我的任务里它恒为 '1'（那是报名/有效语义），
+                     * 而同一活动的记录接口 signStatus 才是 '0'=未签到 / '3'=未签退 / '1'=已完成。
+                     */
+                    var taskSignedIn =
+                      clubSignDone(sameTask ? currentTask.signInStatus : '') ||
+                      clubSignDone(base.signInStatus) ||
+                      clubSignDone(taskItem.signInStatus);
+                    var taskSignedOut =
+                      clubSignDone(sameTask ? currentTask.signBackStatus : '') ||
+                      clubSignDone(base.signBackStatus) ||
+                      clubSignDone(taskItem.signBackStatus);
+                    // 记录接口是补充证据：任务口径没有时用它兜「手机已签到/已完成」
+                    var officialIn = taskSignedIn || recordSignedIn;
+                    var officialOut = taskSignedOut || recordCompleted;
+
+                    /**
+                     * 已完成（列表口径 optionStatus=4 且官方签到签退都齐）→ 只留一行说明，不再消耗预算。
+                     * 除此之外**不再按 optionStatus 静默跳过**：真实上游「我的任务」条目常见 optionStatus='4'
+                     * 或字段缺失，历史实现要求 ∈{1,2}，龙泉那批活动因此一行结果都不产出（用户只看到「什么都没发生」）。
+                     */
+                    if (recordCompleted || (clubEffectiveStatus(taskItem) === '4' && officialIn && officialOut)) {
+                      results.push(row('club', 'signIn', id, 'skipped', 'already-signed-out-upstream', {
+                        activityName: name,
+                        optionStatus: clubEffectiveStatus(taskItem),
+                        signInEvidence: recordCompleted ? 'record' : 'sign-task',
+                      }));
+                      return;
+                    }
 
                     /**
                      * 坐标来源（顺序即安全口径）：
-                     *  1) currentSignTask 下发、且 activityId 与当前活动一致 → 用它（唯一可信来源）；
-                     *  2) 仅在 `club.allowActivityCoords=true` 时才允许用活动列表 latitude/longitude 兜底，
-                     *     并在结果行 detail 标注 'activity-coords'。
-                     * 默认关闭列表兜底：列表坐标可能是另一个校区（用户实测「报到龙泉校区」）。
+                     *  1) currentSignTask 下发、且 activityId 与当前活动一致 → 唯一可信来源（官方口径）；
+                     *  2) 配置的签到点（club.fallbackLatitude/Longitude）→ 标注 fallback-coords；
+                     *  3) club.allowActivityCoords=true 时才允许用**本活动自己**的 latitude/longitude。
+                     * 真实上游条目并不下发 latitude/longitude（2026-10-23 实测），所以 2 才是可用兜底。
                      */
-                    var coord = null;
-                    var coordSource = '';
-                    if (currentTask && clubActivityId(currentTask) === id) {
-                      coord = clubCoord(currentTask, currentTask.latitude, currentTask.longitude);
-                      if (coord) coordSource = 'sign-task';
-                    }
-                    if (!coord && config.club.allowActivityCoords === true) {
-                      coord = clubCoord(base, base.latitude, base.longitude);
-                      if (coord) coordSource = 'activity-coords';
-                    }
+                    var coordInfo = resolveClubCoord(config, currentTask, id, base);
+                    var coord = coordInfo.coord;
+                    var coordSource = coordInfo.source;
 
                     var signInWindowMs = clubWindowMinutes(config.club.signInWindowMinutes, CLUB_SIGNIN_WINDOW_MIN) * 60000;
                     var signOutWindowMs = clubWindowMinutes(config.club.signOutWindowMinutes, CLUB_SIGNOUT_WINDOW_MIN) * 60000;
 
-                    var officialIn = clubSignDone(base.signInStatus || taskItem.signInStatus);
-                    var officialOut = clubSignDone(base.signBackStatus || taskItem.signBackStatus);
-
                     if (config.club.signIn) {
                       if (startMs === null) {
-                        inner.push(Promise.resolve(results.push(row('club', 'signIn', id, 'waiting-material', 'missing-date'))));
+                        results.push(row('club', 'signIn', id, 'waiting-material', 'missing-date', { activityName: name }));
                       } else if (officialIn) {
-                        results.push(row('club', 'signIn', id, 'skipped', 'already-signed-in-upstream'));
+                        results.push(row('club', 'signIn', id, 'skipped', 'already-signed-in-upstream', { activityName: name }));
                       } else {
+                        // 实参顺序与形参严格对齐：canRun 是函数、activityName 是字符串（历史实现这两处是反的）
                         inner.push(
-                          planClubSign(state, config, account, results, cred, id, 'signIn', '1', startMs, startMs + signInWindowMs, coord, activityNameOf(taskItem, base),
+                          planClubSign(state, config, account, results, cred, id, 'signIn', '1', startMs, startMs + signInWindowMs, coord,
                             function () {
                               return true; // 签到无前置依赖
-                            }, coordSource),
+                            }, name, coordSource, { dateSource: dateSource }),
                         );
                       }
                     }
                     if (config.club.signOut) {
                       if (endMs === null) {
-                        results.push(row('club', 'signOut', id, 'waiting-material', 'missing-date'));
+                        results.push(row('club', 'signOut', id, 'waiting-material', 'missing-date', { activityName: name }));
                       } else if (officialOut) {
-                        results.push(row('club', 'signOut', id, 'skipped', 'already-signed-out-upstream'));
+                        results.push(row('club', 'signOut', id, 'skipped', 'already-signed-out-upstream', { activityName: name }));
                       } else {
                         var inKey = dedupeKey({ date: today, account: account, module: 'club', activityId: id, action: 'signIn' });
+                        // 签退前置证据留痕：本地提交 > 任务口径 > 记录口径
+                        var signInEvidence = state.done[inKey] ? 'local' : (taskSignedIn ? 'sign-task' : (recordSignedIn ? 'record' : ''));
                         inner.push(
                           planClubSign(
                             state, config, account, results, cred, id, 'signOut', '2',
                             endMs - signOutWindowMs, endMs, coord,
                             function () {
-                              // 签退依赖：本地签到成功 或 官方已签到
+                              // 签退依赖：本地签到成功 或 官方已签到（任务口径/记录口径）
                               return Boolean(state.done[inKey]) || officialIn;
                             },
-                            activityNameOf(taskItem, base),
+                            name,
                             coordSource,
+                            { dateSource: dateSource, signInEvidence: signInEvidence },
                           ),
                         );
                       }
@@ -1991,18 +2459,40 @@
       return { lat: lat, lng: lng };
     }
 
-    function planClubSign(state, config, account, results, cred, id, action, signType, windowStart, windowEnd, coord, canRun, activityName, coordSource) {
+    /**
+     * 俱乐部签到坐标解析（顺序即安全口径）：
+     *  1) currentSignTask 下发、且 activityId 与当前活动一致 → 唯一可信来源（官方口径）；
+     *  2) 配置的签到点（club.fallbackLatitude/Longitude）→ 标注 fallback-coords；
+     *  3) club.allowActivityCoords=true → 用同一条活动自己的 latitude/longitude（真实上游常不下发）。
+     * 都拿不到 → null，由调用方产出 need-coords（明确等待，绝不用别的活动的坐标硬提交）。
+     */
+    function resolveClubCoord(config, currentTask, id, base) {
+      if (currentTask && clubActivityId(currentTask) === id) {
+        var fromTask = clubCoord(currentTask, currentTask.latitude, currentTask.longitude);
+        if (fromTask) return { coord: fromTask, source: 'sign-task' };
+      }
+      var fromConfig = clubCoord(config, config.club.fallbackLatitude, config.club.fallbackLongitude);
+      if (fromConfig) return { coord: fromConfig, source: 'fallback-coords' };
+      if (config.club.allowActivityCoords === true) {
+        var fromList = clubCoord(base, base.latitude, base.longitude);
+        if (fromList) return { coord: fromList, source: 'activity-coords' };
+      }
+      return { coord: null, source: '' };
+    }
+
+    function planClubSign(state, config, account, results, cred, id, action, signType, windowStart, windowEnd, coord, canRun, activityName, coordSource, info) {
       var t = now();
+      var name = String(activityName == null ? '' : activityName);
       if (t < windowStart) {
-        results.push(row('club', action, id, 'not-yet', 'before-window'));
+        results.push(row('club', action, id, 'not-yet', 'before-window', { activityName: name }));
         return Promise.resolve();
       }
       if (t > windowEnd) {
-        results.push(row('club', action, id, 'expired', 'window-passed'));
+        results.push(row('club', action, id, 'expired', 'window-passed', { activityName: name }));
         return Promise.resolve();
       }
       if (typeof canRun === 'function' && !canRun()) {
-        results.push(row('club', action, id, 'waiting-material', 'need-sign-in-first'));
+        results.push(row('club', action, id, 'waiting-material', 'need-sign-in-first', { activityName: name }));
         return Promise.resolve();
       }
       var today = beijingDateString(t);
@@ -2017,8 +2507,21 @@
       var lat = coord && String(coord.lat == null ? '' : coord.lat).trim();
       var lng = coord && String(coord.lng == null ? '' : coord.lng).trim();
       if (!lat || !lng || Number(lat) === 0 || Number(lng) === 0) {
-        // 拿不到可信坐标就明确等（绝不用另一个校区的列表坐标硬提交）
-        results.push(row('club', action, id, 'waiting-material', 'need-coords', coordSource ? { coordSource: coordSource } : undefined));
+        /**
+         * 拿不到可信坐标就明确等（绝不用别的活动的坐标硬提交）。
+         * 注：真实上游条目不下发 latitude/longitude，若学校也没下发签到位，唯一出路是
+         * 在俱乐部卡片里填「签到点坐标」（club.fallbackLatitude/Longitude）——否则会一直停在这里。
+         * 诊断必须**可操作**：告诉用户去哪儿填、填哪个校区（多校区时最容易填错点位）。
+         */
+        var coordCampus = clubCampusOf({ activityName: name });
+        var coordHint = '活动「' + (name || id) + '」缺少签到坐标：请在运行页填写「签到点坐标（纬度/经度）」，'
+          + '或在该成员页单独设置'
+          + (coordCampus ? '（本场次校区：' + coordCampus + '，请填该校区签到点）' : '')
+          + '；学校下发签到位后会自动优先使用学校坐标。';
+        results.push(
+          row('club', action, id, 'waiting-material', 'need-coords',
+            { activityName: name, coordSource: coordSource || 'none', detail: coordHint }),
+        );
         return Promise.resolve();
       }
 
@@ -2036,12 +2539,16 @@
         var check = state.clubChecks[key] || { count: 0, lastAt: 0 };
         if (check.count >= retryMax) {
           results.push(
-            row('club', action, id, 'waiting-material', 'club-attempts-exhausted', { attempts: check.count, maxAttempts: retryMax }),
+            row('club', action, id, 'waiting-material', 'club-attempts-exhausted',
+              { activityName: name, attempts: check.count, maxAttempts: retryMax }),
           );
           return Promise.resolve();
         }
         if (check.lastAt && retryMs > 0 && t < check.lastAt + retryMs) {
-          results.push(row('club', action, id, 'waiting-material', 'club-retry-pending', { attempts: check.count, maxAttempts: retryMax }));
+          results.push(
+            row('club', action, id, 'waiting-material', 'club-retry-pending',
+              { activityName: name, attempts: check.count, maxAttempts: retryMax }),
+          );
           return Promise.resolve();
         }
         check.count += 1;
@@ -2059,6 +2566,9 @@
 
       var extra = {};
       if (coordSource) extra.coordSource = coordSource;
+      // 诊断留痕：日期来自完整日期还是 MM-DD 推断 / 签到证据来自哪里（本地·任务·记录）
+      if (info && info.dateSource) extra.dateSource = info.dateSource;
+      if (info && info.signInEvidence) extra.signInEvidence = info.signInEvidence;
       return perform(
         state,
         Object.assign(
@@ -3638,6 +4148,18 @@
     clubActivityId: clubActivityId,
     clubEffectiveStatus: clubEffectiveStatus,
     clubSignDone: clubSignDone,
+    redactText: redactText,
+    sanitizeError: sanitizeError,
+    classifyThrownReason: classifyThrownReason,
+    clubHhmmss: clubHhmmss,
+    clubNameKey: clubNameKey,
+    clubRecordSignState: clubRecordSignState,
+    clubFullDateText: clubFullDateText,
+    resolveClubDateText: resolveClubDateText,
+    clubText: clubText,
+    clubCampusOf: clubCampusOf,
+    clubPassesCampus: clubPassesCampus,
+    clearClubCheckLocks: clearClubCheckLocks,
     extractList: extractList,
     extractBoundImageItems: extractBoundImageItems,
     keywordMatch: keywordMatch,
