@@ -1,0 +1,36 @@
+# 安装来源：原版 3CT 程序本体（只读；由本机提供，不随仓库分发）
+/3CT/
+# 个人资料
+/二课积分管理表/
+
+# 1CT 构建产物与本机资料（不随仓库分发）
+/1CT/
+/1CT升级包/
+/dist/
+/启动1CT.exe
+/.tmp/
+/artifacts/
+
+# 从原包 sourcemap 恢复的 vendor 生成物（install_1ct.py extract-vendor 产出）
+/desktop/vendor/
+
+# 本机二课机制笔记（只留本机，不入库）
+/docs/ek-qr-*.md
+/docs/ek-no-qr-bypass.md
+
+# Local credentials and runtime state
+.env
+.env.*
+!.env.example
+config.local.json
+*.sqlite
+*.sqlite3
+*.db
+/runtime/
+/logs/
+
+# Generated outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/

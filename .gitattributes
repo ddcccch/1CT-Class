@@ -1,0 +1,3 @@
+# 兜底启动脚本必须保持 CRLF：cmd.exe 在 GBK 控制台下会把 LF-only 批处理解析错
+# （见 desktop/install_1ct.py write_start_script）。
+start-1ct.cmd text eol=crlf
